@@ -1,0 +1,22 @@
+# ROS2 / colcon
+build/
+install/
+log/
+
+# Local Claude settings
+.claude/settings.local.json
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+
+# Editor / OS
+.vscode/
+.idea/
+*.swp
+.DS_Store
+
+# Stray local file (SQLite db accidentally written as a hostname)
+127.0.0.1

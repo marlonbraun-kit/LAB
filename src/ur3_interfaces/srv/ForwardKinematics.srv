@@ -1,0 +1,5 @@
+# Request
+float64[] joint_angles
+---
+# Response
+geometry_msgs/Pose pose

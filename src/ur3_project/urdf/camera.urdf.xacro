@@ -1,0 +1,112 @@
+<?xml version="1.0"?>
+<!--
+  Eye-in-Hand Depth + Colour Camera
+  ───────────────────────────────────
+  Mounted on the gripper base plate, looking toward the gripper fingertips
+  along the tool Z axis.  This gives a direct view of the object being
+  grasped and allows can detection as the arm approaches the left table.
+
+  Mount position (relative to gripper_base_link)
+  ───────────────────────────────────────────────
+    xyz = "0  0.050  0.095"
+      • 50 mm to the +Y side of the gripper base  (clears the fingers)
+      • 95 mm forward along gripper Z (flush with finger extension)
+    rpy = "0  0  -1.5707963"
+      • -90° yaw rotation so the camera lens faces along -Y of the gripper
+        (toward the fingertips / work object)
+
+  Topics published by libgazebo_ros_camera.so
+  ────────────────────────────────────────────
+    /camera/image_raw          – RGB image  (640 × 480, 10 Hz)
+    /camera/depth/image_raw    – Depth image
+    /camera/camera_info        – Intrinsics
+
+  Note: replace kinetic.stl / kinetic.dae with the actual product mesh once
+        the CAD export is available.  The optical frame uses the ROS camera
+        convention (Z forward, X right, Y down).
+-->
+<robot xmlns:xacro="http://ros.org/wiki/xacro">
+
+  <material name="camera_red">
+    <color rgba="1 0 0 1"/>
+  </material>
+
+  <!-- ── Camera body link ─────────────────────────────────────────────── -->
+  <link name="camera_link">
+    <inertial>
+      <origin xyz="-0.00936 -0.00003 -0.00273" rpy="0 0 0"/>
+      <mass value="0.21970"/>
+      <inertia
+        ixx="4.292e-6" ixy="0"       ixz="2.565e-8"
+        iyy="8.027e-8"               iyz="0"
+        izz="4.273e-6"/>
+    </inertial>
+    <visual>
+      <geometry>
+        <mesh filename="package://ur3_project/meshes/sensors/camera/kinetic.stl"/>
+      </geometry>
+      <material name="camera_red"/>
+    </visual>
+    <collision>
+      <geometry>
+        <mesh filename="package://ur3_project/meshes/sensors/camera/kinetic.dae"/>
+      </geometry>
+    </collision>
+  </link>
+
+  <!--
+    Mount joint:  gripper_base_link → camera_link
+    Offset 50 mm to the +Y side of the gripper base (clears the fingers),
+    95 mm forward along gripper Z (aligned with finger extension height).
+    rpy "0 -π/2 -π/2" rotates the camera so its lens faces the -Y direction of
+    gripper_base_link, i.e. looking toward the gripper fingers / work object.
+  -->
+  <joint name="camera_joint" type="fixed">
+    <parent link="gripper_base_link"/>
+    <child  link="camera_link"/>
+    <origin xyz="0 0.050 0.095" rpy="0 -1.5707963 -1.5707963"/>
+  </joint>
+
+  <!-- ── Optical frame ────────────────────────────────────────────────── -->
+  <!-- Standard ROS camera convention: Z forward, X right, Y down -->
+  <link name="camera_optical_link"/>
+
+  <joint name="camera_optical_joint" type="fixed">
+    <parent link="camera_link"/>
+    <child  link="camera_optical_link"/>
+    <origin xyz="0 0 0" rpy="-1.5707963 0 -1.5707963"/>
+  </joint>
+
+  <!-- ── Gazebo depth + colour sensor plugin ──────────────────────────── -->
+  <gazebo reference="camera_link">
+    <sensor name="realsense_d435" type="depth">
+      <pose>0 0 0 0 0 0</pose>
+      <visualize>true</visualize>
+      <update_rate>10</update_rate>
+      <camera>
+        <!-- ~69° horizontal FOV, matching an Intel RealSense D435 -->
+        <horizontal_fov>1.2043</horizontal_fov>
+        <image>
+          <format>R8G8B8</format>
+          <width>640</width>
+          <height>480</height>
+        </image>
+        <clip>
+          <near>0.05</near>
+          <far>5.0</far>
+        </clip>
+        <noise>
+          <type>gaussian</type>
+          <mean>0.0</mean>
+          <stddev>0.005</stddev>
+        </noise>
+      </camera>
+      <plugin name="camera_controller" filename="libgazebo_ros_camera.so">
+        <frame_name>camera_optical_link</frame_name>
+        <min_depth>0.05</min_depth>
+        <max_depth>5.0</max_depth>
+      </plugin>
+    </sensor>
+  </gazebo>
+
+</robot>

@@ -1,0 +1,59 @@
+<?xml version="1.0"?>
+<?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
+<package format="3">
+  <name>ur3_project</name>
+  <version>0.0.0</version>
+  <description>UR3 pick-and-place project (FK/IK, state machine, RViz visualization)</description>
+  <maintainer email="marlon@todo.todo">marlon</maintainer>
+  <license>Apache-2.0</license>
+
+  <buildtool_depend>ament_cmake</buildtool_depend>
+
+  <depend>xacro</depend>
+  <depend>rclcpp</depend>
+  <depend>rclpy</depend>
+  <depend>std_msgs</depend>
+  <depend>trajectory_msgs</depend>
+  <depend>sensor_msgs</depend>
+  <depend>geometry_msgs</depend>
+  <depend>visualization_msgs</depend>
+  <depend>tf2_ros</depend>
+
+  <!-- Custom interfaces -->
+  <depend>ur3_interfaces</depend>
+
+  <!-- Simulation -->
+  <depend>gazebo_ros</depend>
+  <depend>gazebo_ros2_control</depend>
+
+  <!-- Controllers / state publishing -->
+  <depend>controller_manager</depend>
+  <depend>joint_trajectory_controller</depend>
+  <depend>position_controllers</depend>
+  <depend>joint_state_broadcaster</depend>
+  <depend>joint_state_publisher</depend>
+  <depend>robot_state_publisher</depend>
+  <depend>rviz2</depend>
+
+  <!-- UR-specific -->
+  <depend>ur_description</depend>
+  <depend>ur_controllers</depend>
+
+  <!-- MoveIt2 -->
+  <depend>moveit_msgs</depend>
+  <depend>shape_msgs</depend>
+  <depend>moveit_ros_move_group</depend>
+  <depend>moveit_kinematics</depend>
+  <depend>moveit_planners_ompl</depend>
+  <depend>moveit_simple_controller_manager</depend>
+  <depend>moveit_configs_utils</depend>
+  <depend>ur_moveit_config</depend>
+
+  <test_depend>ament_lint_auto</test_depend>
+  <test_depend>ament_lint_common</test_depend>
+
+  <export>
+    <build_type>ament_cmake</build_type>
+    <gazebo_ros gazebo_model_path="/home/marlon/LAB/install/ur3_project/share/"/>
+  </export>
+</package>

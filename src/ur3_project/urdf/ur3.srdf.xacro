@@ -1,0 +1,108 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<robot xmlns:xacro="http://wiki.ros.org/xacro" name="ur3_camera_gripper">
+
+  <!-- Arm planning group — chain ends at TCP so IK targets gripper_tcp_link. -->
+  <group name="ur_manipulator">
+    <chain base_link="base_link" tip_link="gripper_tcp_link"/>
+  </group>
+
+  <!-- wait_forward: gripper_tcp_link at WAIT_TCP (0.30, 0.20, 0.35), facing +Y
+       (FORWARD_QUAT = (0, 0.7071, 0.7071, 0)). wrist_3 = +pi/2 branch, shared
+       by all pick-cycle IK solutions so no 2*pi joint jump occurs. Joint values
+       below match config/initial_positions.yaml so spawn lands here. -->
+  <group_state name="wait_forward" group="ur_manipulator">
+    <joint name="shoulder_pan_joint"  value="0.2210"/>
+    <joint name="shoulder_lift_joint" value="-2.2994"/>
+    <joint name="elbow_joint"         value="1.8025"/>
+    <joint name="wrist_1_joint"       value="0.4969"/>
+    <joint name="wrist_2_joint"       value="0.2210"/>
+    <joint name="wrist_3_joint"       value="1.5708"/>
+  </group_state>
+
+  <!-- home: legacy forward-facing pose at (0.418, 0.112, 0.402). wrist_3=+pi branch.
+       Kept for reference; pick_place_manager uses wait_forward instead. -->
+  <group_state name="home" group="ur_manipulator">
+    <joint name="shoulder_pan_joint"  value="0"/>
+    <joint name="shoulder_lift_joint" value="-1.2"/>
+    <joint name="elbow_joint"         value="1.2"/>
+    <joint name="wrist_1_joint"       value="-1.0"/>
+    <joint name="wrist_2_joint"       value="1.5707"/>
+    <joint name="wrist_3_joint"       value="3.14159"/>
+  </group_state>
+  <group_state name="up" group="ur_manipulator">
+    <joint name="elbow_joint"         value="0"/>
+    <joint name="shoulder_lift_joint" value="-1.5707"/>
+    <joint name="shoulder_pan_joint"  value="0"/>
+    <joint name="wrist_1_joint"       value="-1.5707"/>
+    <joint name="wrist_2_joint"       value="0"/>
+    <joint name="wrist_3_joint"       value="0"/>
+  </group_state>
+
+  <!-- Gripper group -->
+  <group name="gripper">
+    <joint name="gripper_left_finger_joint"/>
+    <joint name="gripper_right_finger_joint"/>
+  </group>
+
+  <group_state name="open" group="gripper">
+    <joint name="gripper_left_finger_joint"  value="0.02"/>
+    <joint name="gripper_right_finger_joint" value="0.02"/>
+  </group_state>
+  <group_state name="grip" group="gripper">
+    <joint name="gripper_left_finger_joint"  value="0.002"/>
+    <joint name="gripper_right_finger_joint" value="0.002"/>
+  </group_state>
+  <group_state name="closed" group="gripper">
+    <joint name="gripper_left_finger_joint"  value="0.000"/>
+    <joint name="gripper_right_finger_joint" value="0.000"/>
+  </group_state>
+
+  <end_effector name="gripper"
+                parent_link="tool0"
+                group="gripper"
+                parent_group="ur_manipulator"/>
+
+  <virtual_joint name="world_to_base"
+                 type="fixed"
+                 parent_frame="world"
+                 child_link="base_link"/>
+
+  <!-- Disable self-collisions for adjacent/always-touching link pairs. -->
+  <disable_collisions link1="base_link"         link2="base_link_inertia"         reason="Adjacent"/>
+  <disable_collisions link1="base_link_inertia" link2="shoulder_link"             reason="Adjacent"/>
+  <disable_collisions link1="shoulder_link"     link2="upper_arm_link"            reason="Adjacent"/>
+  <disable_collisions link1="upper_arm_link"    link2="forearm_link"              reason="Adjacent"/>
+  <disable_collisions link1="forearm_link"      link2="wrist_1_link"              reason="Adjacent"/>
+  <disable_collisions link1="wrist_1_link"      link2="wrist_2_link"              reason="Adjacent"/>
+  <disable_collisions link1="wrist_2_link"      link2="wrist_3_link"              reason="Adjacent"/>
+  <disable_collisions link1="wrist_3_link"      link2="tool0"                     reason="Adjacent"/>
+  <disable_collisions link1="tool0"             link2="wrist_1_link"              reason="Never"/>
+  <disable_collisions link1="tool0"             link2="wrist_2_link"              reason="Never"/>
+  <disable_collisions link1="wrist_1_link"      link2="wrist_3_link"              reason="Never"/>
+  <disable_collisions link1="tool0"             link2="gripper_base_link"         reason="Adjacent"/>
+  <disable_collisions link1="wrist_3_link"      link2="gripper_base_link"         reason="Adjacent"/>
+  <disable_collisions link1="wrist_2_link"      link2="gripper_base_link"         reason="Never"/>
+  <disable_collisions link1="gripper_base_link" link2="gripper_left_finger_link"  reason="Adjacent"/>
+  <disable_collisions link1="gripper_base_link" link2="gripper_right_finger_link" reason="Adjacent"/>
+  <disable_collisions link1="gripper_left_finger_link"  link2="gripper_right_finger_link" reason="Default"/>
+  <disable_collisions link1="gripper_left_finger_link"  link2="wrist_3_link"      reason="Never"/>
+  <disable_collisions link1="gripper_right_finger_link" link2="wrist_3_link"      reason="Never"/>
+
+  <!-- Camera is rigidly mounted near the wrist — disable all camera collisions
+       with adjacent links since they overlap by design. -->
+  <disable_collisions link1="camera_link" link2="gripper_base_link"         reason="Adjacent"/>
+  <disable_collisions link1="camera_link" link2="wrist_3_link"              reason="Adjacent"/>
+  <disable_collisions link1="camera_link" link2="tool0"                     reason="Adjacent"/>
+  <disable_collisions link1="camera_link" link2="gripper_left_finger_link"  reason="Never"/>
+  <disable_collisions link1="camera_link" link2="gripper_right_finger_link" reason="Never"/>
+  <disable_collisions link1="camera_link" link2="wrist_2_link"              reason="Never"/>
+  <disable_collisions link1="camera_optical_link" link2="gripper_base_link" reason="Adjacent"/>
+  <disable_collisions link1="camera_optical_link" link2="wrist_3_link"      reason="Never"/>
+
+  <!-- The robot is mounted on the table_top, so the base sits flush with
+       the table surface. Disable collisions between the mount and the
+       static workspace so MoveIt does not flag a permanent collision. -->
+  <disable_collisions link1="base_link"         link2="table_top"          reason="Adjacent"/>
+  <disable_collisions link1="base_link_inertia" link2="table_top"          reason="Adjacent"/>
+
+</robot>

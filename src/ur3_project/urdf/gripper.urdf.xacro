@@ -1,0 +1,214 @@
+<?xml version="1.0"?>
+<!--
+  2-Finger Parallel Gripper — UR3 Pick-and-Place
+  ================================================
+  Meshes are exported from CAD (Creo Parametric STEP → STL).
+    meshes/gripper/gripper_large_left.stl
+    meshes/gripper/gripper_large_right.stl
+
+  ── Measured CAD geometry (mm) ──────────────────────────────────────────
+  Left  finger bounding box: X[  8.00, 38.46]  Y[−40.00, 15.00]  Z[−82.11, 23.88]
+  Right finger bounding box: X[−38.38, −8.00]  Y[−40.00, 15.00]  Z[−82.11, 23.88]
+  Finger size per side: 30.46 mm (X) × 55.00 mm (Y) × 105.99 mm (Z)
+
+  ── Coordinate alignment ─────────────────────────────────────────────────
+  STEP convention  : Z+ toward robot flange (mounting side),  Z− toward fingertip
+  URDF convention  : Z+ toward fingertip  (same as tool0 Z toward workpiece)
+  Applied transform: pure translation (no rotation) — see visual <origin> below.
+
+  After translation the mesh sits in the link frame with:
+    • Inner face     at X = 0 (link origin)
+    • Outer face     at X = ±0.03046 m  (± for left/right)
+    • Mounting face  at Z = 0
+    • Fingertip      at Z = +0.10599 m
+
+  ── Joint axis ───────────────────────────────────────────────────────────
+  Fingers open/close along the X axis of the gripper frame:
+    left  finger : axis [+1, 0, 0]  →  opens toward +X
+    right finger : axis [−1, 0, 0]  →  opens toward −X
+
+  ── Joint limits ─────────────────────────────────────────────────────────
+  joint = 0.000 m  → fully closed  (inner gap = 0 mm,  fingers touching)
+  joint = 0.040 m  → grip position (inner gap = 80 mm ≈ can Ø 78.86 mm + 1 mm/side)
+  joint = 0.055 m  → fully open    (inner gap = 110 mm, approach clearance)
+
+  ── TCP ──────────────────────────────────────────────────────────────────
+  Midpoint of the gripping zone: Z = 0.120 m (base) + 0.053 m (½ finger length)
+                                    = 0.173 m from tool0
+-->
+<robot xmlns:xacro="http://wiki.ros.org/xacro">
+
+  <xacro:macro name="parallel_gripper" params="prefix parent *origin">
+
+    <!-- ════════════════════════════════════════════════════════════════
+         GRIPPER BASE  (adapter plate, 80 × 80 × 30 mm)
+         ════════════════════════════════════════════════════════════════ -->
+    <link name="${prefix}gripper_base_link">
+      <inertial>
+        <origin xyz="0 0 0.015" rpy="0 0 0"/>
+        <mass value="0.200"/>
+        <!-- Box 0.080 × 0.080 × 0.030 m, m = 0.200 kg
+             Ixx = (1/12)*0.2*(0.08²+0.03²) = 1.217e-4
+             Iyy = same (square cross-section)
+             Izz = (1/12)*0.2*(0.08²+0.08²) = 2.133e-4 -->
+        <inertia ixx="1.217e-4" ixy="0" ixz="0"
+                 iyy="1.217e-4"       iyz="0"
+                 izz="2.133e-4"/>
+      </inertial>
+      <visual>
+        <origin xyz="0 0 0.015" rpy="0 0 0"/>
+        <geometry><box size="0.080 0.080 0.030"/></geometry>
+        <material name="${prefix}gripper_aluminium">
+          <color rgba="0.75 0.75 0.75 1.0"/>
+        </material>
+      </visual>
+      <collision>
+        <origin xyz="0 0 0.015" rpy="0 0 0"/>
+        <geometry><box size="0.080 0.080 0.030"/></geometry>
+      </collision>
+    </link>
+
+    <joint name="${prefix}gripper_base_joint" type="fixed">
+      <!-- -90 deg about end-effector Z aligns fingers with the camera orientation -->
+      <origin xyz="0 0 0" rpy="0 0 -1.5707963"/>
+      <parent link="${parent}"/>
+      <child  link="${prefix}gripper_base_link"/>
+    </joint>
+
+    <!-- ════════════════════════════════════════════════════════════════
+         LEFT FINGER  — opens in +X direction
+         CAD origin transform (applied to the STL mesh, scale 0.001):
+           rpy = "0 0 0"   (mesh already aligned, no rotation needed)
+           xyz = "−0.008  0  0.08211"
+                  ↑ shifts inner face (X=8.0 mm) to X=0 of link frame
+                          ↑ shifts fingertip (Z=−82.11 mm) to Z=0 of link frame
+         ════════════════════════════════════════════════════════════════ -->
+    <link name="${prefix}gripper_left_finger_link">
+      <inertial>
+        <!-- CoM at approximate geometric centre of the finger volume -->
+        <origin xyz="0.01523 -0.0125 0.022995" rpy="0 0 0"/>
+        <mass value="0.050"/>
+        <!-- Box approximation 0.03046 × 0.05500 × 0.10599 m, m = 0.050 kg
+             Ixx = (1/12)*0.05*(0.05500²+0.10599²) = 5.941e-5
+             Iyy = (1/12)*0.05*(0.03046²+0.10599²) = 5.068e-5
+             Izz = (1/12)*0.05*(0.03046²+0.05500²) = 1.647e-5 -->
+        <inertia ixx="5.941e-5" ixy="0" ixz="0"
+                 iyy="5.068e-5"       iyz="0"
+                 izz="1.647e-5"/>
+      </inertial>
+
+      <!-- Visual uses the CAD-derived STL mesh (mm → m via scale) -->
+      <visual>
+        <origin xyz="-0.008 0 0.05211" rpy="0 0 0"/>
+        <geometry>
+          <mesh filename="package://ur3_project/meshes/gripper/gripper_large_left.stl"
+                scale="0.001 0.001 0.001"/>
+        </geometry>
+        <material name="${prefix}gripper_dark">
+          <color rgba="0.20 0.20 0.20 1.0"/>
+        </material>
+      </visual>
+
+      <!-- Collision uses a box for physics stability -->
+      <collision>
+        <origin xyz="0.01523 -0.0125 0.022995" rpy="0 0 0"/>
+        <geometry><box size="0.03046 0.05500 0.10599"/></geometry>
+      </collision>
+    </link>
+
+    <joint name="${prefix}gripper_left_finger_joint" type="prismatic">
+      <parent link="${prefix}gripper_base_link"/>
+      <child  link="${prefix}gripper_left_finger_link"/>
+      <!-- Joint frame offset from base plate; fingers touch at joint=0 -->
+      <origin xyz="0 0 0.120" rpy="0 0 0"/>
+      <axis xyz="1 0 0"/>
+      <limit lower="0.000" upper="0.055" effort="50.0" velocity="0.10"/>
+      <dynamics damping="0.50" friction="0.10"/>
+    </joint>
+
+    <!-- ════════════════════════════════════════════════════════════════
+         RIGHT FINGER  — opens in −X direction (mirror of left)
+         CAD origin transform:
+           rpy = "0 0 0"
+           xyz = "+0.008  0  0.08211"
+                  ↑ shifts inner face (X=−8.0 mm) to X=0 of link frame
+         ════════════════════════════════════════════════════════════════ -->
+    <link name="${prefix}gripper_right_finger_link">
+      <inertial>
+        <origin xyz="-0.01523 -0.0125 0.022995" rpy="0 0 0"/>
+        <mass value="0.050"/>
+        <inertia ixx="5.941e-5" ixy="0" ixz="0"
+                 iyy="5.068e-5"       iyz="0"
+                 izz="1.647e-5"/>
+      </inertial>
+
+      <visual>
+        <origin xyz="0.008 0 0.05211" rpy="0 0 0"/>
+        <geometry>
+          <mesh filename="package://ur3_project/meshes/gripper/gripper_large_right.stl"
+                scale="0.001 0.001 0.001"/>
+        </geometry>
+        <material name="${prefix}gripper_dark">
+          <color rgba="0.20 0.20 0.20 1.0"/>
+        </material>
+      </visual>
+
+      <collision>
+        <origin xyz="-0.01523 -0.0125 0.022995" rpy="0 0 0"/>
+        <geometry><box size="0.03046 0.05500 0.10599"/></geometry>
+      </collision>
+    </link>
+
+    <joint name="${prefix}gripper_right_finger_joint" type="prismatic">
+      <parent link="${prefix}gripper_base_link"/>
+      <child  link="${prefix}gripper_right_finger_link"/>
+      <origin xyz="0 0 0.120" rpy="0 0 0"/>
+      <axis xyz="-1 0 0"/>
+      <limit lower="0.000" upper="0.055" effort="50.0" velocity="0.10"/>
+      <dynamics damping="0.50" friction="0.10"/>
+      <!-- Kinematic mimic for URDF/RViz visualisation — actual Gazebo control
+           commands both joints simultaneously via gripper_controller -->
+      <mimic joint="${prefix}gripper_left_finger_joint" multiplier="1.0" offset="0.0"/>
+    </joint>
+
+    <!-- ════════════════════════════════════════════════════════════════
+         TCP  — Tool Centre Point
+         Z = 0.120 m (base height) + 0.053 m (½ finger length) = 0.173 m from tool0
+         ════════════════════════════════════════════════════════════════ -->
+    <link name="${prefix}gripper_tcp_link"/>
+    <joint name="${prefix}gripper_tcp_joint" type="fixed">
+      <parent link="${prefix}gripper_base_link"/>
+      <child  link="${prefix}gripper_tcp_link"/>
+      <origin xyz="0 0 0.173" rpy="0 0 0"/>
+    </joint>
+
+    <!-- ════════════════════════════════════════════════════════════════
+         GAZEBO SURFACE PROPERTIES
+         ════════════════════════════════════════════════════════════════ -->
+    <gazebo reference="${prefix}gripper_base_link">
+      <material>Gazebo/Grey</material>
+    </gazebo>
+
+    <gazebo reference="${prefix}gripper_left_finger_link">
+      <mu1>1.8</mu1>
+      <mu2>1.8</mu2>
+      <kp>500000.0</kp>
+      <kd>50.0</kd>
+      <minDepth>0.0005</minDepth>
+      <maxContacts>10</maxContacts>
+      <material>Gazebo/DarkGrey</material>
+    </gazebo>
+
+    <gazebo reference="${prefix}gripper_right_finger_link">
+      <mu1>1.8</mu1>
+      <mu2>1.8</mu2>
+      <kp>500000.0</kp>
+      <kd>50.0</kd>
+      <minDepth>0.0005</minDepth>
+      <maxContacts>10</maxContacts>
+      <material>Gazebo/DarkGrey</material>
+    </gazebo>
+
+  </xacro:macro>
+
+</robot>

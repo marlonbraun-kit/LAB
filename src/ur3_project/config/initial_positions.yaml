@@ -1,0 +1,7 @@
+shoulder_pan_joint:   0.2210
+shoulder_lift_joint: -2.2994
+elbow_joint:          1.8025
+wrist_1_joint:        0.4969
+wrist_2_joint:        0.2210
+wrist_3_joint:        1.5708
+gripper_left_finger_joint: 0.02
