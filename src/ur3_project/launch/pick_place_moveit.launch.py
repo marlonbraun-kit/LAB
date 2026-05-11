@@ -17,12 +17,15 @@ Stack started:
   pick_place_manager_node      state machine (calls MoveGroup action)
   rviz_visualizer_node         markers + place-slot visualisation
   depth_camera_node            simulated camera source (only when fake_camera:=true)
+  native_vision_node           real RealSense + YOLO source (only when fake_camera:=false);
+                               publishes /front_detections in camera_optical_link
   rviz2                        only when rviz:=true
 
-External topic contract (the teammates' nodes publish these on the real robot):
-  /target_can_pose        ur3_interfaces/CanDetectionArray
-                          - source="top"   -> from above-camera (positions only)
-                          - source="front" -> from front-camera (positions + class_name)
+External topic contract:
+  /front_detections       ur3_interfaces/CanDetectionArray  (camera_optical_link)
+                          - native_vision_node publishes class + 3D position; the
+                            pick_place_manager TF-transforms to base_link, overrides z
+                            with FIXED_CAN_Z, and republishes on /target_can_pose.
   /human_proximity        std_msgs/Float32   in [0, 1] (0=danger, 1=safe)
 
 Operator inputs (same in every mode):
@@ -237,15 +240,21 @@ def generate_launch_description():
         }],
         emulate_tty=True,
     )
+    # Simulated camera (publishes /target_can_pose directly). Only started
+    # when fake_camera is enabled (true, or 'auto' in home-sim mode).
     depth_camera = Node(
         package=pkg, executable='depth_camera_node.py', output='log',
+        condition=IfCondition(fake_camera_enabled),
+    )
+    # Real RealSense + YOLO node. Publishes /front_detections (with
+    # class_name + position in camera_optical_link); pick_place_manager
+    # transforms and republishes them as /target_can_pose. Started only
+    # when the fake camera is *not* in use.
+    native_vision = Node(
+        package=pkg, executable='native_vision_node.py', output='screen',
         condition=IfCondition(
-            PythonExpression([
-                "'true' if ('", rviz_arg, "'.lower() == 'true' and '",
-                debug_arg, "'.lower() == 'true') or ('",
-                rviz_arg, "'.lower() == 'false' and '",
-                debug_arg, "'.lower() == 'false') else 'false'"
-            ])
+            PythonExpression(["'true' if '", fake_camera_enabled,
+                              "'.lower() != 'true' else 'false'"])
         ),
     )
     rviz_visualizer = Node(
@@ -260,7 +269,7 @@ def generate_launch_description():
             move_group,
             TimerAction(period=5.0, actions=[
                 planning_scene_manager, pick_place_manager,
-                depth_camera, rviz_visualizer, rviz,
+                depth_camera, native_vision, rviz_visualizer, rviz,
             ]),
         ])
     )

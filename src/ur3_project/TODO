@@ -1,5 +1,5 @@
-Find out which pin actuates gripper (no pin=0 and fun=1)
-Find out if open is 0 or 1
+Change to ur3e
+move depth detection by 3.2cm to center of can
 
 
 
@@ -7,3 +7,5 @@ DONE:
 Fix bug with open gripper at launch
 Fix bug with failing cartesian (probably open gripper bug or wrong seed)
 Add seed bfore preplace
+Find out which pin actuates gripper (no pin=0 and fun=1)
+Find out if open is 0 or 1

@@ -6,11 +6,13 @@ Cycle (one /pick_command can trigger many picks)
 BOOT
   -> MOVE_TO_WAIT          joint goal -> WAIT_DOWN_JOINTS  (camera looks down)
   -> WAIT_FOR_COMMAND      hold until /pick_command (e.g. "coke,mahou")
-  -> LOCALIZE              wait for /target_can_pose with source="top"
   -> ORIENT_FORWARD        joint goal -> WAIT_FORWARD_JOINTS
   -> MOVE_TO_IDENTIFY      joint goal -> IDENTIFY_JOINTS
-  -> IDENTIFY_FROM_FRONT   wait for /target_can_pose with source="front" and
-                           match class names to localized positions (nearest XY)
+  -> IDENTIFY_FROM_FRONT   wait for a /front_detections message from
+                           native_vision_node — each detection carries both
+                           class_name and 3D position in camera_optical_link.
+                           Positions are transformed to base_link and the
+                           z component is overridden with FIXED_CAN_Z.
   -> NEXT_TARGET           pop next class from queue, look up matched position,
                            solve IK chain.  When queue empty -> ALL_DONE.
   -> PLAN_TO_PREGRASP
@@ -47,12 +49,13 @@ from scipy.optimize import least_squares
 import rclpy
 from rclpy.action import ActionClient
 from rclpy.callback_groups import MutuallyExclusiveCallbackGroup, ReentrantCallbackGroup
+from rclpy.duration import Duration
 from rclpy.executors import MultiThreadedExecutor
 from rclpy.node import Node
 
 from std_msgs.msg import String, Float64MultiArray, Float32, Empty, Bool
 from ur_msgs.srv import SetIO
-from geometry_msgs.msg import Pose, PoseStamped, Vector3
+from geometry_msgs.msg import Pose, PoseStamped, Vector3, PointStamped
 from sensor_msgs.msg import JointState
 
 from moveit_msgs.action import ExecuteTrajectory, MoveGroup
@@ -66,7 +69,10 @@ from moveit_msgs.msg import (
     WorkspaceParameters,
 )
 
-from ur3_interfaces.msg import CanDetectionArray
+import tf2_ros
+import tf2_geometry_msgs  # noqa: F401  (registers PointStamped do_transform)
+
+from ur3_interfaces.msg import CanDetection, CanDetectionArray
 
 
 # ---------------------------------------------------------------------------
@@ -143,9 +149,15 @@ NUM_PLACE_SLOTS = len(PLACE_SLOT_OFFSETS)
 
 IDENTIFY_TCP = (0.09, -0.30, 0.10)
 
-# Distance (m) under which a "front" detection is considered the same can
-# as a previously localised "top" detection.
-DETECTION_MATCH_DIST = 0.05
+# Fixed can height (z) in base_link frame, applied to every detection from the
+# front camera. The camera's depth estimate is noisy at close range and the
+# grasp height is determined geometrically by the table + can geometry, so we
+# override the reported z with this constant.
+FIXED_CAN_Z = 0.06
+
+# Source frame published by native_vision_node — detections arrive in the
+# camera optical frame and are transformed to base_link before use.
+CAMERA_OPTICAL_FRAME = 'camera_optical_link'
 
 # ---------------------------------------------------------------------------
 # Gripper commands
@@ -382,14 +394,12 @@ class PickPlaceManagerNode(Node):
         self._sub_group = ReentrantCallbackGroup()
 
         self.state_pub = self.create_publisher(String, '/pick_place_state', 10)
-        # Zimmer HRC-03: electric gripper, controlled by a single digital
-        # output on the UR controller. fun=1 = standard DO, pin = wiring-
-        # specific (verify on pendant I/O screen). state=1.0 -> close,
-        # state=0.0 -> open (flip if your wiring is inverted).
+        # Zimmer HRC-03: 2-wire tool DO control. fun=1 (FUN_SET_DIGITAL_OUT)
+        # for all digital outputs; tool outputs use pin 16 (TOOL_DOUT0=open)
+        # and pin 17 (TOOL_DOUT1=close). Never assert both simultaneously.
         self.gripper_io_client = self.create_client(
             SetIO, '/io_and_status_controller/set_io'
         )
-        self._gripper_io_pin = 0
         self._gripper_io_fun = 1
         # RViz-only visualisation: publish the same open/close intent to the
         # mock-backed gripper position controller so the URDF fingers move.
@@ -405,8 +415,24 @@ class PickPlaceManagerNode(Node):
             PoseStamped, '/current_pick_target', 1,
         )
 
+        # Republish transformed detections so planning_scene_manager and
+        # rviz_visualizer (both subscribers of /target_can_pose) see the cans
+        # in base_link with the fixed z applied.
+        self.target_pose_pub = self.create_publisher(
+            CanDetectionArray, '/target_can_pose', 10,
+        )
+
+        # TF used to transform native_vision_node detections from
+        # camera_optical_link into base_link.
+        self.tf_buffer = tf2_ros.Buffer()
+        self.tf_listener = tf2_ros.TransformListener(self.tf_buffer, self)
+
         self.create_subscription(
             CanDetectionArray, '/target_can_pose', self._on_detections, 10,
+            callback_group=self._sub_group,
+        )
+        self.create_subscription(
+            CanDetectionArray, '/front_detections', self._on_front_detections, 10,
             callback_group=self._sub_group,
         )
         self.create_subscription(
@@ -449,9 +475,7 @@ class PickPlaceManagerNode(Node):
 
         # Cycle inputs / matched data
         self.command_queue = []          # list[str] of remaining can classes to pick
-        self.localized_positions = []    # list[(x,y,z)] from source="top"
         self.identified = []             # list[{'class': str, 'pos': (x,y,z)}]
-        self.frame_id = 'base_link'
 
         # Per-pick state
         self.active_target_pos = None    # (x, y, z)
@@ -536,97 +560,86 @@ class PickPlaceManagerNode(Node):
     # Subscriptions
     # ------------------------------------------------------------------
 
-    def _on_detections(self, msg):
-        """Receive a /target_can_pose message.
+    def _on_front_detections(self, msg):
+        """Bridge native_vision_node -> /target_can_pose.
 
-        - In LOCALIZE: store positions of all detections whose source starts
-          with 'top'.
-        - In IDENTIFY_FROM_FRONT: take detections whose source starts with
-          'front', match each to its localised neighbour by nearest XY, build
-          the {class -> position} table.
-        Any other state ignores incoming detections.
+        native_vision_node publishes /front_detections in camera_optical_link
+        with the depth-camera estimate of (x, y, z). For planning we need
+        base_link coordinates and a known-good z (the camera's depth at close
+        range is noisy and the grasp height is set by table geometry). This
+        callback transforms each detection into base_link, replaces z with
+        FIXED_CAN_Z, and republishes the result on /target_can_pose so the
+        rest of the pipeline (this node's IDENTIFY handler, the planning
+        scene, the RViz markers) sees a single canonical detection stream.
         """
         if not msg.detections:
             return
-
-        def _source_matches(det, prefix):
-            src = (det.source or '').strip().lower()
-            return src.startswith(prefix)
-
-        sources = sorted({(d.source or '').strip().lower() for d in msg.detections})
-        self.get_logger().info(
-            f'_on_detections: state={self.state} motion_mode={self._motion_mode} '
-            f'n={len(msg.detections)} sources={sources}'
-        )
-
-        if self.state == 'LOCALIZE':
-            top_dets = [d for d in msg.detections if _source_matches(d, 'top')]
-            if not top_dets:
-                self.get_logger().info('  LOCALIZE: no top-source detections, ignoring')
-                return
-            self.localized_positions = [
-                (float(d.position.x), float(d.position.y), float(d.position.z))
-                for d in top_dets
-            ]
-            self.frame_id = msg.header.frame_id or 'base_link'
-            self.get_logger().info(
-                f'Localized {len(self.localized_positions)} can(s) from above.'
-            )
-            self._enter('ORIENT_FORWARD')
-            return
-
-        if self.state == 'IDENTIFY_FROM_FRONT' and self._motion_mode is None:
-            front_dets = [d for d in msg.detections if _source_matches(d, 'front')]
-            if not front_dets:
-                self.get_logger().info('  IDENTIFY: no front-source detections, ignoring')
-                return
-            matched = self._match_front_to_localised(front_dets)
-            if matched is None:
-                self.get_logger().warn(
-                    f'  IDENTIFY: matcher returned None '
-                    f'(front_dets={[(d.class_name, d.position.x, d.position.y) for d in front_dets]} '
-                    f'localized={self.localized_positions})'
+        src_frame = msg.header.frame_id or CAMERA_OPTICAL_FRAME
+        out = CanDetectionArray()
+        out.header.stamp = self.get_clock().now().to_msg()
+        out.header.frame_id = 'base_link'
+        for det in msg.detections:
+            pt_in = PointStamped()
+            pt_in.header.frame_id = src_frame
+            pt_in.header.stamp = msg.header.stamp
+            pt_in.point.x = float(det.position.x)
+            pt_in.point.y = float(det.position.y)
+            pt_in.point.z = float(det.position.z)
+            try:
+                pt_out = self.tf_buffer.transform(
+                    pt_in, 'base_link', timeout=Duration(seconds=0.2)
                 )
-                return
-            self.identified = matched
-            classes = sorted({m['class'] for m in matched})
-            self.get_logger().info(
-                f'Identified {len(matched)} can(s): classes={classes}'
-            )
-            self._enter('NEXT_TARGET')
+            except tf2_ros.TransformException as e:
+                self.get_logger().warn(
+                    f'TF {src_frame}->base_link failed: {e}; skipping detection.'
+                )
+                continue
+            new_det = CanDetection()
+            new_det.header = out.header
+            new_det.id = det.id
+            new_det.class_name = det.class_name
+            new_det.confidence = det.confidence
+            new_det.position.x = pt_out.point.x
+            new_det.position.y = pt_out.point.y
+            new_det.position.z = FIXED_CAN_Z
+            new_det.source = 'front'
+            out.detections.append(new_det)
+        if out.detections:
+            self.target_pose_pub.publish(out)
+
+    def _on_detections(self, msg):
+        """Receive a /target_can_pose message.
+
+        Only acts in IDENTIFY_FROM_FRONT: every detection carries a
+        class_name and a (x, y, z) position already in base_link with the
+        fixed z applied (see _on_front_detections). We build the
+        {class -> position} list directly and transition to NEXT_TARGET.
+        """
+        if not msg.detections:
+            return
+        if self.state != 'IDENTIFY_FROM_FRONT' or self._motion_mode is not None:
             return
 
-    def _match_front_to_localised(self, front_dets):
-        """Pair each front-camera detection with the closest localised position.
-
-        If localised positions exist, the resulting list uses them as the
-        ground-truth pose (top-down localisation is more accurate for XY).
-        Otherwise we fall back to using the front detection's own position.
-        """
-        results = []
-        used = set()
-        for det in front_dets:
+        matched = []
+        for det in msg.detections:
             cls = (det.class_name or '').strip().lower()
             if not cls:
                 continue
-            fx, fy, fz = float(det.position.x), float(det.position.y), float(det.position.z)
-            best_idx = None
-            best_d = float('inf')
-            for i, (lx, ly, lz) in enumerate(self.localized_positions):
-                if i in used:
-                    continue
-                d = math.hypot(fx - lx, fy - ly)
-                if d < best_d:
-                    best_d = d
-                    best_idx = i
-            if best_idx is not None and best_d <= DETECTION_MATCH_DIST:
-                lx, ly, lz = self.localized_positions[best_idx]
-                results.append({'class': cls, 'pos': (lx, ly, lz)})
-                used.add(best_idx)
-            else:
-                # No top-localised twin within tolerance — use front pose.
-                results.append({'class': cls, 'pos': (fx, fy, fz)})
-        return results if results else None
+            matched.append({
+                'class': cls,
+                'pos': (float(det.position.x),
+                        float(det.position.y),
+                        float(det.position.z)),
+            })
+        if not matched:
+            self.get_logger().info('  IDENTIFY: no detections with class_name set, ignoring')
+            return
+        self.identified = matched
+        classes = sorted({m['class'] for m in matched})
+        self.get_logger().info(
+            f'Identified {len(matched)} can(s): classes={classes}'
+        )
+        self._enter('NEXT_TARGET')
 
     def _on_command(self, msg):
         """A new pick command queues classes to grasp in order."""
@@ -644,10 +657,9 @@ class PickPlaceManagerNode(Node):
             )
             return
         self.command_queue = items
-        self.localized_positions = []
         self.identified = []
         self.get_logger().info(f'Command accepted: {items}')
-        self._enter('LOCALIZE')
+        self._enter('ORIENT_FORWARD')
 
     def _on_clear_place_zone(self, _msg):
         self.place_slots_filled = [False] * NUM_PLACE_SLOTS
@@ -801,17 +813,24 @@ class PickPlaceManagerNode(Node):
         self._enter('WAIT')
 
     def _send_gripper(self, value):
-        # Binary gripper. Treat anything below GRIPPER_OPEN as "close".
+        # 2-wire control: TDO0=1 opens, TDO1=1 closes. Never assert both.
         close = value < GRIPPER_OPEN
-        req = SetIO.Request()
-        req.fun = self._gripper_io_fun
-        req.pin = self._gripper_io_pin
-        req.state = 1.0 if close else 0.0
-        if self.gripper_io_client.service_is_ready():
-            self.gripper_io_client.call_async(req)
-        else:
+        if not self.gripper_io_client.service_is_ready():
             self.get_logger().warn(
                 'set_io service not ready — gripper command dropped.')
+            return
+        # Deactivate the opposing solenoid before activating the desired one
+        # so there is never a brief window where both are high (= no-op).
+        if close:
+            pins_ordered = ((16, 0.0), (17, 1.0))  # kill open, then fire close
+        else:
+            pins_ordered = ((17, 0.0), (16, 1.0))  # kill close, then fire open
+        for pin, state in pins_ordered:
+            req = SetIO.Request()
+            req.fun = self._gripper_io_fun
+            req.pin = pin
+            req.state = state
+            self.gripper_io_client.call_async(req)
         # Mirror to RViz visualisation joints.
         msg = Float64MultiArray()
         msg.data = [float(value), float(value)]
@@ -1208,10 +1227,6 @@ class PickPlaceManagerNode(Node):
                 self._enter(self._next_state_after_wait)
             return
 
-        if s == 'LOCALIZE':
-            # Held here until _on_detections consumes a source="top" message.
-            return
-
         if s == 'ORIENT_FORWARD':
             self.set_forward_orientation()
             return
@@ -1318,7 +1333,7 @@ class PickPlaceManagerNode(Node):
         self.active_place_slot = slot
         self.active_target_pos = (cx, cy, cz)
         self.active_target_class = next_class
-        self.active_target_frame = self.frame_id or 'base_link'
+        self.active_target_frame = 'base_link'
         # Once committed, drop from queue + identified so the next pick
         # picks a different physical can if multiple of same class.
         self.command_queue.pop(0)

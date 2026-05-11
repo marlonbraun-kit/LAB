@@ -138,12 +138,15 @@ single shot.
 
 ## External topic contract
 
-The teammates' camera/recognition nodes publish here on the real robot. For at-home
-testing publish them yourself (or rely on `depth_camera_node` in sim mode):
+On the real robot the localisation/recognition is done by
+`native_vision_node` (RealSense SR305 + YOLO) bundled with this package.
+For at-home testing publish them yourself (or rely on `depth_camera_node`
+in sim mode):
 
 | Topic | Type | Direction | Notes |
 |---|---|---|---|
-| `/target_can_pose` | `ur3_interfaces/CanDetectionArray` | external → manager | each `CanDetection.source` is `"top"` (above-camera, positions only) or `"front"` (front-camera, positions + `class_name`) |
+| `/front_detections` | `ur3_interfaces/CanDetectionArray` | `native_vision_node` → manager | detections in `camera_optical_link`. Each carries `class_name` + 3D position. The manager TF-transforms to `base_link`, overrides z with `FIXED_CAN_Z = 0.06 m`, and republishes on `/target_can_pose` for the rest of the stack. |
+| `/target_can_pose` | `ur3_interfaces/CanDetectionArray` | manager → planning_scene / rviz_visualizer | internal canonical detection stream (`base_link`). The sim-only `depth_camera_node` publishes here directly. |
 | `/human_proximity` | `std_msgs/Float32` | external → manager | `0.0` = hand close (danger), `1.0` = safe. Below `HUMAN_PROXIMITY_THRESHOLD = 0.5` the next motion segment uses 0.5 × normal vel/acc scaling. |
 
 ## Operator topics
@@ -156,18 +159,12 @@ testing publish them yourself (or rely on `depth_camera_node` in sim mode):
 Manual-publish examples (testing at home):
 
 ```bash
-# fake "top" localisation scan (positions only)
+# fake identification: provide class + position directly in base_link.
+# z is ignored by the manager — every can is treated as sitting at FIXED_CAN_Z.
 ros2 topic pub --once /target_can_pose ur3_interfaces/msg/CanDetectionArray \
   '{header: {frame_id: base_link}, detections: [
-    {position: {x: -0.25, y: -0.30, z: 0.06}, source: "top"},
-    {position: {x: -0.35, y: -0.30, z: 0.06}, source: "top"}
-  ]}'
-
-# fake "front" identification scan (positions + classes)
-ros2 topic pub --once /target_can_pose ur3_interfaces/msg/CanDetectionArray \
-  '{header: {frame_id: base_link}, detections: [
-    {class_name: "coke",  position: {x: -0.25, y: -0.30, z: 0.06}, source: "front"},
-    {class_name: "mahou", position: {x: -0.35, y: -0.30, z: 0.06}, source: "front"}
+    {class_name: "coke",  position: {x: 0.20, y: -0.25, z: 0.06}, source: "front"},
+    {class_name: "mahou", position: {x: 0.20, y: -0.35, z: 0.06}, source: "front"}
   ]}'
 
 # trigger the cycle
@@ -184,9 +181,10 @@ ros2 topic pub --once /clear_place_zone std_msgs/Empty '{}'
 
 | Node | Role | Key topics / services |
 |---|---|---|
-| `pick_place_manager_node` | State machine; calls MoveIt2 | pub `/pick_place_state`, pub `/gripper_controller/commands` (RViz-only visual mirror), pub `/current_pick_target`, pub `/display_planned_path` (debug only); sub `/target_can_pose`, `/pick_command`, `/clear_place_zone`, `/human_proximity`, `/joint_states`; action `/move_action`, `/execute_trajectory`; srv `/io_and_status_controller/set_io` (real gripper) |
+| `pick_place_manager_node` | State machine; calls MoveIt2; bridges `/front_detections` → `/target_can_pose` | pub `/pick_place_state`, `/gripper_controller/commands` (RViz-only visual mirror), `/current_pick_target`, `/target_can_pose`, `/display_planned_path` (debug only); sub `/target_can_pose`, `/front_detections`, `/pick_command`, `/clear_place_zone`, `/human_proximity`, `/joint_states`; uses TF `camera_optical_link → base_link`; action `/move_action`, `/execute_trajectory`; srv `/io_and_status_controller/set_io` (real gripper) |
 | `planning_scene_manager_node` | Keeps MoveIt planning scene in sync | sub `/target_can_pose` (CanDetectionArray), `/current_pick_target`, `/pick_place_state`; srv `/apply_planning_scene` |
-| `depth_camera_node` | Sim-only fake camera source | pub `/target_can_pose` (alternates `source="top"` and `source="front"`), pub `/camera/depth/image_raw` |
+| `native_vision_node` | Real RealSense SR305 + YOLO (only on real robot) | pub `/front_detections` (`source="front"`, `frame_id="camera_optical_link"`, 30 Hz) |
+| `depth_camera_node` | Sim-only fake camera source (only with `fake_camera:=true`) | pub `/target_can_pose` (`source="front"`), pub `/camera/depth/image_raw` |
 | `rviz_visualizer_node` | Markers + TF for RViz | pub `/visualization_markers`, broadcasts TF `pick_zone`, `place_zone`, `can_active`, `approach_point` |
 
 ### Startup sequence (managed by launch file)
@@ -198,7 +196,8 @@ ros2_control_node + robot_state_publisher
             └─ move_group
                  └─ (5 s delay) planning_scene_manager_node
                                 pick_place_manager_node    (debug_step from `debug` arg)
-                                depth_camera_node
+                                depth_camera_node           (only when fake_camera enabled)
+                                native_vision_node          (only when fake_camera disabled)
                                 rviz_visualizer_node
                                 rviz2                       (only when rviz:=true)
 ```
@@ -211,12 +210,12 @@ ros2_control_node + robot_state_publisher
 BOOT
  └─ MOVE_TO_WAIT          joint-space: arm → WAIT_DOWN_JOINTS  (camera looks down)
  └─ WAIT_FOR_COMMAND      hold until /pick_command (e.g. "coke,mahou")
- └─ LOCALIZE              wait for /target_can_pose with source="top"
-                          (positions of every can in the pickup zone)
  └─ ORIENT_FORWARD        joint-space: arm → WAIT_FORWARD_JOINTS
  └─ MOVE_TO_IDENTIFY      joint-space: arm → IDENTIFY_JOINTS
- └─ IDENTIFY_FROM_FRONT   wait for /target_can_pose with source="front"
-                          and pair each class with its localised XY twin
+ └─ IDENTIFY_FROM_FRONT   wait for /front_detections (native_vision_node).
+                          Each detection already carries class_name + xy;
+                          z is fixed to FIXED_CAN_Z and the orientation is
+                          always FORWARD_QUAT (no per-can pose estimation).
  ┌─→ NEXT_TARGET          pop next class from queue, pick the next free
  │                        place-zone slot, solve IK chain
  │ └─ PLAN_TO_PREGRASP
@@ -403,13 +402,14 @@ to route the entire arm geometry around them.
 
 ## Simulated camera source (sim mode only)
 
-`depth_camera_node` is a stand-in for the teammates' camera/recognition nodes
-during home simulation. It only runs when `fake_camera:=true` (or `auto`
-which resolves to true in home-sim mode).
+`depth_camera_node` is a stand-in for `native_vision_node` during home
+simulation. It only runs when `fake_camera:=true` (or `auto` which resolves
+to true in home-sim mode).
 
-It publishes a `CanDetectionArray` to `/target_can_pose` at 1 Hz, alternating
-between a `source="top"` message (positions, no class) and a `source="front"`
-message (positions + class) so the manager can step through both phases.
+It publishes a `CanDetectionArray` to `/target_can_pose` directly in
+`base_link` with `source="front"` and full `class_name` info — the manager
+no longer requires the prior top-down localisation pass, so a single front
+message is enough to drive the cycle.
 
 Default cans (override via parameters `fake_can_<i>_class`/`x`/`y`/`z`):
 

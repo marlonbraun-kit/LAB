@@ -60,8 +60,18 @@ class NativeVisionNode(Node):
             color_image = np.asanyarray(color_frame.get_data())
             intrinsics = depth_frame.profile.as_video_stream_profile().intrinsics
 
-            results = self.model.track(color_image, persist=True, verbose=False)
-            
+            # The camera is mounted sideways on the gripper, so the raw 640x480
+            # frame is rotated relative to gravity. Rotate 90° CW to a 480x640
+            # portrait image for YOLO (trained on upright cans) and for display.
+            # IMPORTANT: depth_frame and `intrinsics` are NOT rotated — bounding-
+            # box centres are mapped back to the original-frame pixel before
+            # the depth lookup + deprojection, so the published 3D position is
+            # still in the unrotated camera_optical_link frame.
+            H_orig, W_orig = color_image.shape[:2]   # 480, 640
+            color_rot = cv2.rotate(color_image, cv2.ROTATE_90_CLOCKWISE)
+
+            results = self.model.track(color_rot, persist=True, verbose=False)
+
             # Crear el mensaje ROS 2
             msg_array = CanDetectionArray()
             timestamp = self.get_clock().now().to_msg()
@@ -73,26 +83,35 @@ class NativeVisionNode(Node):
                 if result.boxes:
                     for box in result.boxes:
                         x1, y1, x2, y2 = map(int, box.xyxy[0])
-                        x_center, y_center = int((x1 + x2) / 2), int((y1 + y2) / 2)
-                        
-                        # MODIFICACIÓN: YOLO a veces pierde el ID momentáneamente, esto lo asegura
+                        x_center_rot = int((x1 + x2) / 2)
+                        y_center_rot = int((y1 + y2) / 2)
+
+                        # Inverse of ROTATE_90_CLOCKWISE: a pixel at (xr, yr)
+                        # in the rotated image came from (yr, H_orig-1-xr) in
+                        # the original.
+                        x_center = y_center_rot
+                        y_center = H_orig - 1 - x_center_rot
+                        x_center = max(0, min(W_orig - 1, x_center))
+                        y_center = max(0, min(H_orig - 1, y_center))
+
                         track_id = "0"
                         if box.id is not None:
                             track_id = str(int(box.id[0]))
-                            
+
                         clase_id = int(box.cls[0])
-                        
+
                         label = self.nombres_permitidos.get(clase_id, "unknown")
                         if label == "unknown":
                             continue
 
                         distance = depth_frame.get_distance(x_center, y_center)
-                        
+
                         if distance > 0:
-                            spatial_coords = rs.rs2_deproject_pixel_to_point(intrinsics, [x_center, y_center], distance)
+                            spatial_coords = rs.rs2_deproject_pixel_to_point(
+                                intrinsics, [x_center, y_center], distance
+                            )
                             real_x, real_y, real_z = spatial_coords
 
-                            # Rellenar datos para ROS 2
                             det = CanDetection()
                             det.header.stamp = timestamp
                             det.header.frame_id = "camera_optical_link"
@@ -103,17 +122,17 @@ class NativeVisionNode(Node):
                             det.position.y = real_y
                             det.position.z = real_z
                             det.source = "front"
-                            
+
                             detections_list.append(det)
 
-                            cv2.rectangle(color_image, (x1, y1), (x2, y2), (0, 255, 0), 2)
-                            cv2.putText(color_image, f"{label} {distance:.2f}m", (x1, y1 - 10), 
+                            cv2.rectangle(color_rot, (x1, y1), (x2, y2), (0, 255, 0), 2)
+                            cv2.putText(color_rot, f"{label} {distance:.2f}m", (x1, y1 - 10),
                                         cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
 
             msg_array.detections = detections_list
             self.pub.publish(msg_array)
 
-            cv2.imshow("Visor SR305 (Linux Nativo)", color_image)
+            cv2.imshow("Visor SR305 (Linux Nativo)", color_rot)
             cv2.waitKey(1)
 
         except Exception as e:
