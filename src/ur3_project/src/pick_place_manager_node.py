@@ -50,7 +50,8 @@ from rclpy.callback_groups import MutuallyExclusiveCallbackGroup, ReentrantCallb
 from rclpy.executors import MultiThreadedExecutor
 from rclpy.node import Node
 
-from std_msgs.msg import String, Float64MultiArray, Float32, Empty
+from std_msgs.msg import String, Float64MultiArray, Float32, Empty, Bool
+from ur_msgs.srv import SetIO
 from geometry_msgs.msg import Pose, PoseStamped, Vector3
 from sensor_msgs.msg import JointState
 
@@ -71,28 +72,42 @@ from ur3_interfaces.msg import CanDetectionArray
 # ---------------------------------------------------------------------------
 # Orientation quaternions (in planning frame = base_link)
 # ---------------------------------------------------------------------------
-FORWARD_QUAT = (0.0, 0.7071068, 0.7071068, 0.0)
-DOWN_QUAT    = (0.0, 1.0,        0.0,       0.0)
+FORWARD_QUAT = (0.5,       0.5,       0.5,       0.5)
+DOWN_QUAT    = (0.7071068, 0.7071068, 0.0,       0.0)
 
 # ---------------------------------------------------------------------------
 # IK seeds for wait poses
 # ---------------------------------------------------------------------------
 _WAIT_FORWARD_SEED = {
-    'shoulder_pan_joint':  -0.5583,
+    'shoulder_pan_joint':   4.1540926,
     'shoulder_lift_joint': -1.2629,
     'elbow_joint':          1.4456,
     'wrist_1_joint':       -0.1827,
     'wrist_2_joint':       -0.5583,
-    'wrist_3_joint':        1.5708,
+    'wrist_3_joint':        2.7052640,
 }
 
 _WAIT_DOWN_SEED = {
-    'shoulder_pan_joint':   0.2711,
+    'shoulder_pan_joint':   4.9834890,
     'shoulder_lift_joint': -0.7398,
     'elbow_joint':         -0.4602,
     'wrist_1_joint':       -0.3709,
     'wrist_2_joint':       -1.5708,
-    'wrist_3_joint':       -2.8705,
+    'wrist_3_joint':       -1.7360360,
+}
+
+# Seed for the place pose. Same TCP region as the wait-down pose (camera
+# looking down over the place zone) but elbow folded *opposite* to the
+# pickup branch so the upper arm stays clear of the table when reaching
+# down to PLACE_TCP_Z < 0.15 m. Used as the LM seed for q_high during
+# place IK so the whole place chain stays in the elbow-folded branch.
+_PLACE_SEED = {
+    'shoulder_pan_joint':   5.3407,    # 3.7699 + π/2  (≈ 306°)
+    'shoulder_lift_joint': -1.8850,    # -3π/5 (-108°)
+    'elbow_joint':         -1.6965,    # ≈ -97.2°
+    'wrist_1_joint':        3.5186,    # ≈ 201.6°
+    'wrist_2_joint':        0.6283,    # π/5   (36°)
+    'wrist_3_joint':       -3.5151,    # original -3.0788 - 25° (gripper +25°)
 }
 
 # ---------------------------------------------------------------------------
@@ -105,8 +120,8 @@ EE_LINK = 'gripper_tcp_link'
 # ---------------------------------------------------------------------------
 # Task-space geometry  (gripper_tcp_link in base_link frame)
 # ---------------------------------------------------------------------------
-WAIT_TCP = (0.3, 0.2, 0.26)
-APPROACH_OFFSET_Y = 0.08
+WAIT_TCP = (0.2, -0.3, 0.26)
+APPROACH_OFFSET_X = 0.08
 LIFT_Z = 0.12
 # Vertical offset added to the reported can z when the TCP closes on the can.
 # Raises the grasp point up the can body so the gripper closes on the side
@@ -115,18 +130,18 @@ GRASP_Z_OFFSET = 0.05
 
 # Place zone is a 2x2 grid centred on PLACE_ZONE_CENTER in XY.
 # Slots are filled in this order (back-row first).  "back" = +Y.
-PLACE_ZONE_CENTER = (-0.30, 0.20)
+PLACE_ZONE_CENTER = (0.20, 0.30)
 PLACE_GRID_SPACING = 0.12
-PLACE_TCP_Z = 0.17
+PLACE_TCP_Z = 0.1
 PLACE_SLOT_OFFSETS = [
-    (-PLACE_GRID_SPACING / 2.0, +PLACE_GRID_SPACING / 2.0),  # 0: back-left
-    (+PLACE_GRID_SPACING / 2.0, +PLACE_GRID_SPACING / 2.0),  # 1: back-right
-    (-PLACE_GRID_SPACING / 2.0, -PLACE_GRID_SPACING / 2.0),  # 2: front-left
-    (+PLACE_GRID_SPACING / 2.0, -PLACE_GRID_SPACING / 2.0),  # 3: front-right
+    (+PLACE_GRID_SPACING / 2.0, +PLACE_GRID_SPACING / 2.0),  # 3: front-right
+    (+PLACE_GRID_SPACING / 2.0, -PLACE_GRID_SPACING / 2.0),  # 2: front-left
+    (-PLACE_GRID_SPACING / 2.0, +PLACE_GRID_SPACING / 2.0),  # 1: back-right
+    (-PLACE_GRID_SPACING / 2.0, -PLACE_GRID_SPACING / 2.0),  # 0: back-left
 ]
 NUM_PLACE_SLOTS = len(PLACE_SLOT_OFFSETS)
 
-IDENTIFY_TCP = (0.30, 0.09, 0.10)
+IDENTIFY_TCP = (0.09, -0.30, 0.10)
 
 # Distance (m) under which a "front" detection is considered the same can
 # as a previously localised "top" detection.
@@ -151,7 +166,7 @@ SLOWDOWN_FACTOR    = 0.5  # speed multiplier when a hand is close
 HUMAN_PROXIMITY_THRESHOLD = 0.5  # /human_proximity below this -> slow
 
 CARTESIAN_MAX_STEP       = 0.005
-CARTESIAN_JUMP_THRESHOLD = 5.0
+CARTESIAN_JUMP_THRESHOLD = 0.0  # 0 = disabled; allow KDL branch flips along the path
 CARTESIAN_MIN_FRACTION   = 1.0
 
 # If no motion progress is observed for this many seconds, abort the motion
@@ -176,7 +191,8 @@ _RZ_180 = np.array([
 
 
 def _build_tool0_to_tcp():
-    c, s = math.cos(-math.pi/2.0), math.sin(-math.pi/2.0)
+    angle = -math.pi + math.radians(25)
+    c, s = math.cos(angle), math.sin(angle)
     return np.array([
         [c, -s, 0.0, 0.0],
         [s,  c, 0.0, 0.0],
@@ -339,6 +355,18 @@ class PickPlaceManagerNode(Node):
         else:
             self._debug_step = bool(debug_param)
 
+        # Real-robot launches must wait for the URCap "External Control" program
+        # to be running and connected to the reverse interface before the FSM
+        # can send any motion. The launch file sets this False in fake-hardware
+        # mode so home-sim does not hang on a topic that never publishes.
+        self.declare_parameter('wait_for_robot_program', True)
+        wait_param = self.get_parameter('wait_for_robot_program').value
+        if isinstance(wait_param, str):
+            self._wait_for_robot_program = wait_param.strip().lower() == 'true'
+        else:
+            self._wait_for_robot_program = bool(wait_param)
+        self._robot_program_running = False
+
         self._step_event = threading.Event()
         self._planned_traj = None
         self._debug_phase = 'idle'
@@ -354,6 +382,17 @@ class PickPlaceManagerNode(Node):
         self._sub_group = ReentrantCallbackGroup()
 
         self.state_pub = self.create_publisher(String, '/pick_place_state', 10)
+        # Zimmer HRC-03: electric gripper, controlled by a single digital
+        # output on the UR controller. fun=1 = standard DO, pin = wiring-
+        # specific (verify on pendant I/O screen). state=1.0 -> close,
+        # state=0.0 -> open (flip if your wiring is inverted).
+        self.gripper_io_client = self.create_client(
+            SetIO, '/io_and_status_controller/set_io'
+        )
+        self._gripper_io_pin = 0
+        self._gripper_io_fun = 1
+        # RViz-only visualisation: publish the same open/close intent to the
+        # mock-backed gripper position controller so the URDF fingers move.
         self.gripper_pub = self.create_publisher(
             Float64MultiArray, '/gripper_controller/commands', 10
         )
@@ -385,6 +424,11 @@ class PickPlaceManagerNode(Node):
         self._latest_joint_state: JointState | None = None
         self.create_subscription(
             JointState, '/joint_states', self._on_joint_states, 10,
+            callback_group=self._sub_group,
+        )
+        self.create_subscription(
+            Bool, '/io_and_status_controller/robot_program_running',
+            self._on_robot_program_state, 10,
             callback_group=self._sub_group,
         )
 
@@ -457,6 +501,7 @@ class PickPlaceManagerNode(Node):
         self.q_pregrasp = None
         self.q_grasp = None
         self.q_lift = None
+        self.q_retreat = None
         self.q_place = None
 
         self.create_timer(self.TICK_PERIOD, self._tick)
@@ -467,7 +512,13 @@ class PickPlaceManagerNode(Node):
     # ------------------------------------------------------------------
 
     def _stdin_loop(self):
-        for _ in iter(sys.stdin.readline, ''):
+        # When launched via ros2 launch, sys.stdin is a pipe not the terminal.
+        # /dev/tty always refers to the controlling terminal directly.
+        try:
+            tty = open('/dev/tty', 'r')
+        except OSError:
+            tty = sys.stdin
+        for _ in iter(tty.readline, ''):
             self._step_event.set()
 
     def _step_gate_open(self, prompt):
@@ -611,6 +662,26 @@ class PickPlaceManagerNode(Node):
     def _on_joint_states(self, msg: JointState):
         self._latest_joint_state = msg
 
+    def _on_robot_program_state(self, msg: Bool):
+        was_running = self._robot_program_running
+        self._robot_program_running = bool(msg.data)
+        if not was_running and self._robot_program_running:
+            self.get_logger().info(
+                'UR robot program is running and reverse interface is ready — '
+                'starting motion FSM.'
+            )
+
+    def _current_arm_joints_dict(self):
+        js = self._latest_joint_state
+        if js is None:
+            return None
+        out = {}
+        for name in ARM_JOINT_NAMES:
+            if name not in js.name:
+                return None
+            out[name] = float(js.position[js.name.index(name)])
+        return out
+
     # ------------------------------------------------------------------
     # Speed scaling
     # ------------------------------------------------------------------
@@ -628,11 +699,23 @@ class PickPlaceManagerNode(Node):
     def _compute_pick_ik(self, can_x, can_y, can_z, place_xyz):
         seed = self.identify_joints if self.identify_joints is not None else self.wait_forward_joints
 
-        q_pregrasp = ik_for_tcp(can_x, can_y - APPROACH_OFFSET_Y, can_z + GRASP_Z_OFFSET,
-                                FORWARD_QUAT, seed)
+        target_x = can_x - APPROACH_OFFSET_X
+        target_y = can_y
+        target_z = can_z + GRASP_Z_OFFSET
+        self.get_logger().info(
+            f'IK pregrasp target: x={target_x:.3f} y={target_y:.3f} z={target_z:.3f} '
+            f'quat={FORWARD_QUAT}')
+        q_pregrasp = ik_for_tcp(target_x, target_y, target_z, FORWARD_QUAT, seed)
         if q_pregrasp is None:
             self.get_logger().error('IK failed: pregrasp pose unreachable.')
             return False
+        # FK back the IK solution and report the achieved TCP — confirms the
+        # solver actually hit FORWARD_QUAT and the requested xyz.
+        q_arr = np.array([q_pregrasp[n] for n in ARM_JOINT_NAMES])
+        T = _fk_tcp(q_arr)
+        self.get_logger().info(
+            f'IK pregrasp achieved: pos=({T[0,3]:.3f},{T[1,3]:.3f},{T[2,3]:.3f}) '
+            f'R col_z=({T[0,2]:.3f},{T[1,2]:.3f},{T[2,2]:.3f})')
 
         q_grasp = ik_for_tcp(can_x, can_y, can_z + GRASP_Z_OFFSET, FORWARD_QUAT, q_pregrasp)
         if q_grasp is None:
@@ -645,8 +728,12 @@ class PickPlaceManagerNode(Node):
             return False
 
         px, py, pz = place_xyz
+        # Seed the place IK chain with _PLACE_SEED — an elbow-folded branch
+        # that keeps the upper arm clear of the table when reaching down to
+        # low PLACE_TCP_Z. wait_forward_joints would land in the elbow-up
+        # branch, which scrapes the table for PLACE_TCP_Z < 0.15 m.
         q_high = ik_for_tcp(px, py, pz + LIFT_Z + GRASP_Z_OFFSET, FORWARD_QUAT,
-                            self.wait_forward_joints)
+                            _PLACE_SEED)
         if q_high is None:
             self.get_logger().error('IK failed: pre-place pose unreachable.')
             return False
@@ -659,6 +746,7 @@ class PickPlaceManagerNode(Node):
         self.q_grasp    = q_grasp
         self.q_lift     = q_lift
         self.q_place    = q_place
+        self.q_retreat  = q_high  # high pre-place pose, reused for retreat
         return True
 
     # ------------------------------------------------------------------
@@ -713,6 +801,18 @@ class PickPlaceManagerNode(Node):
         self._enter('WAIT')
 
     def _send_gripper(self, value):
+        # Binary gripper. Treat anything below GRIPPER_OPEN as "close".
+        close = value < GRIPPER_OPEN
+        req = SetIO.Request()
+        req.fun = self._gripper_io_fun
+        req.pin = self._gripper_io_pin
+        req.state = 1.0 if close else 0.0
+        if self.gripper_io_client.service_is_ready():
+            self.gripper_io_client.call_async(req)
+        else:
+            self.get_logger().warn(
+                'set_io service not ready — gripper command dropped.')
+        # Mirror to RViz visualisation joints.
         msg = Float64MultiArray()
         msg.data = [float(value), float(value)]
         self.gripper_pub.publish(msg)
@@ -921,6 +1021,33 @@ class PickPlaceManagerNode(Node):
         msg.trajectory.append(robot_trajectory)
         self.display_path_pub.publish(msg)
 
+    def _normalize_trajectory_to_robot(self, traj):
+        """Shift each joint's waypoints by multiples of 2π so the first
+        waypoint matches the robot's current joint position within ±π.
+        This prevents PATH_TOLERANCE_VIOLATED when the UR controller reports
+        a joint in a different revolution than the planner used."""
+        js = self._latest_joint_state
+        if js is None or not traj.joint_trajectory.joint_names:
+            return traj
+        import copy, math
+        traj = copy.deepcopy(traj)
+        jt = traj.joint_trajectory
+        for ji, name in enumerate(jt.joint_names):
+            if name not in js.name:
+                continue
+            robot_pos = js.position[js.name.index(name)]
+            for pi, pt in enumerate(jt.points):
+                if ji >= len(pt.positions):
+                    continue
+                prev = robot_pos if pi == 0 else jt.points[pi - 1].positions[ji]
+                diff = pt.positions[ji] - prev
+                # wrap diff into (-π, π]
+                diff = (diff + math.pi) % (2 * math.pi) - math.pi
+                positions = list(pt.positions)
+                positions[ji] = prev + diff
+                jt.points[pi].positions = tuple(positions)
+        return traj
+
     def _dispatch_cached_execute(self):
         if self._planned_traj is None:
             self.get_logger().error('No cached trajectory to execute.')
@@ -931,7 +1058,7 @@ class PickPlaceManagerNode(Node):
             self._motion_failed = True
             return False
         goal = ExecuteTrajectory.Goal()
-        goal.trajectory = self._planned_traj
+        goal.trajectory = self._normalize_trajectory_to_robot(self._planned_traj)
         self._exec_goal_future = self.execute_client.send_goal_async(goal)
         self._exec_goal_future.add_done_callback(self._on_exec_goal_response)
         return True
@@ -1017,41 +1144,36 @@ class PickPlaceManagerNode(Node):
     def plan_to_pregrasp(self):
         self._handle_joint_move(self.q_pregrasp, next_on_success='CARTESIAN_APPROACH')
 
-    def cartesian_approach(self):
+    def joint_approach(self):
+        # Joint-space move to the pre-computed q_grasp. q_grasp shares the
+        # same wrist branch as q_pregrasp (seeded chain), so the path stays
+        # branch-consistent and avoids the KDL flip that broke the Cartesian
+        # planner. Over 8 cm the TCP path is visually near-straight.
         if self._motion_mode is None:
             self._send_gripper(GRIPPER_OPEN)
-        x, y, z = self.active_target_pos
-        self._handle_cartesian_move(
-            make_forward_tcp_pose(x, y, z + GRASP_Z_OFFSET),
-            next_on_success='GRASP',
-        )
+        self._handle_joint_move(self.q_grasp, next_on_success='GRASP')
 
     def grasp(self):
         self._send_gripper(GRIPPER_GRIP)
         self._sleep(1.0, 'CARTESIAN_LIFT')
 
-    def cartesian_lift(self):
-        x, y, z = self.active_target_pos
-        self._handle_cartesian_move(
-            make_forward_tcp_pose(x, y, z + LIFT_Z + GRASP_Z_OFFSET),
-            next_on_success='PLAN_TO_PLACE',
-        )
+    def joint_lift(self):
+        self._handle_joint_move(self.q_lift, next_on_success='PLAN_TO_PLACE')
 
     def plan_to_place(self):
         self._handle_joint_move(self.q_place, next_on_success='RELEASE')
 
-    def cartesian_retreat(self):
-        if self.active_place_slot is None:
-            self.get_logger().warn('No active place slot at retreat — aborting.')
+    def joint_retreat(self):
+        # Joint-space move to q_retreat (the high pre-place IK solution).
+        # Same reasoning as joint_approach: a Cartesian planner here flips
+        # KDL branches mid-path and lands the robot in a twisted
+        # configuration that can't plan back to WAIT_DOWN afterwards.
+        if self.q_retreat is None:
+            self.get_logger().warn('No q_retreat available — aborting.')
             self._abort_cycle()
             self._enter('ORIENT_DOWN_AT_WAIT')
             return
-        px, py, pz = self._slot_xyz(self.active_place_slot)
-        self._handle_cartesian_move(
-            make_forward_tcp_pose(px, py, pz + LIFT_Z + GRASP_Z_OFFSET),
-            next_on_success='AFTER_RETREAT',
-            avoid_collisions=False,
-        )
+        self._handle_joint_move(self.q_retreat, next_on_success='AFTER_RETREAT')
 
     def orient_down_at_wait(self):
         self._handle_joint_move(self.wait_down_joints, next_on_success='WAIT_FOR_COMMAND')
@@ -1064,6 +1186,12 @@ class PickPlaceManagerNode(Node):
         s = self.state
 
         if s == 'BOOT':
+            self._enter('WAIT_FOR_ROBOT')
+            return
+
+        if s == 'WAIT_FOR_ROBOT':
+            if self._wait_for_robot_program and not self._robot_program_running:
+                return
             self._send_gripper(GRIPPER_OPEN)
             self._enter('MOVE_TO_WAIT')
             return
@@ -1105,7 +1233,7 @@ class PickPlaceManagerNode(Node):
             return
 
         if s == 'CARTESIAN_APPROACH':
-            self.cartesian_approach()
+            self.joint_approach()
             return
 
         if s == 'GRASP':
@@ -1113,7 +1241,7 @@ class PickPlaceManagerNode(Node):
             return
 
         if s == 'CARTESIAN_LIFT':
-            self.cartesian_lift()
+            self.joint_lift()
             return
 
         if s == 'PLAN_TO_PLACE':
@@ -1127,7 +1255,7 @@ class PickPlaceManagerNode(Node):
             return
 
         if s == 'CARTESIAN_RETREAT':
-            self.cartesian_retreat()
+            self.joint_retreat()
             return
 
         if s == 'AFTER_RETREAT':

@@ -21,6 +21,7 @@ install(PROGRAMS
   src/depth_camera_node.py
   src/rviz_visualizer_node.py
   src/planning_scene_manager_node.py
+  scripts/native_vision_node.py
   DESTINATION lib/${PROJECT_NAME}
 )
 

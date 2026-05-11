@@ -38,6 +38,7 @@
   <!-- UR-specific -->
   <depend>ur_description</depend>
   <depend>ur_controllers</depend>
+  <depend>ur_msgs</depend>
 
   <!-- MoveIt2 -->
   <depend>moveit_msgs</depend>

@@ -24,22 +24,22 @@ UR3_DH = [
     (0.0,       0.0819,  0.0),
 ]
 
-PICK_ZONE = (0.3, 0.2, 0.0)
-PLACE_ZONE = (-0.3,  0.2, 0.0)
+PICK_ZONE = ( 0.2, -0.3, 0.0)
+PLACE_ZONE = (0.2,  0.3, 0.0)
 ZONE_SIZE = (0.3, 0.3, 0.001)
 
 # Match pick_place_manager_node's PLACE_SLOT_OFFSETS layout exactly so the
 # visualised slots line up with where the robot actually places cans.
 PLACE_GRID_SPACING = 0.12
 PLACE_SLOT_OFFSETS = [
-    (-PLACE_GRID_SPACING / 2.0, +PLACE_GRID_SPACING / 2.0),  # back-left
-    (+PLACE_GRID_SPACING / 2.0, +PLACE_GRID_SPACING / 2.0),  # back-right
-    (-PLACE_GRID_SPACING / 2.0, -PLACE_GRID_SPACING / 2.0),  # front-left
-    (+PLACE_GRID_SPACING / 2.0, -PLACE_GRID_SPACING / 2.0),  # front-right
+    (-PLACE_GRID_SPACING / 2.0, -PLACE_GRID_SPACING / 2.0),  # back-left
+    (-PLACE_GRID_SPACING / 2.0, +PLACE_GRID_SPACING / 2.0),  # back-right
+    (+PLACE_GRID_SPACING / 2.0, -PLACE_GRID_SPACING / 2.0),  # front-left
+    (+PLACE_GRID_SPACING / 2.0, +PLACE_GRID_SPACING / 2.0),  # front-right
 ]
 SLOT_MARKER_SIZE = (0.08, 0.08, 0.001)
 
-APPROACH_OFFSET_Y = 0.1
+APPROACH_OFFSET_X = 0.1
 BASE_FRAME = 'base_link'
 
 RZ_FIX = np.array([
@@ -181,7 +181,7 @@ class RvizVisualizerNode(Node):
         m.action = Marker.ADD
         m.pose.position.x, m.pose.position.y, m.pose.position.z = 0.0, 0.0, -0.025
         m.pose.orientation.w = 1.0
-        m.scale.x, m.scale.y, m.scale.z = 1.5, 0.8, -0.05
+        m.scale.x, m.scale.y, m.scale.z = 0.8, 1.5, -0.05
         m.color = rgba(1.0, 1.0, 1.0, 1.0)
         return m
 
@@ -192,11 +192,11 @@ class RvizVisualizerNode(Node):
         m.ns = 'backboard'
         m.id = 11
         m.type = Marker.CUBE
-        m.pose.position.x = 0.0
-        m.pose.position.y = -0.325
+        m.pose.position.x = -0.325
+        m.pose.position.y = 0.0
         m.pose.position.z = 0.25
         m.pose.orientation.w = 1.0
-        m.scale.x, m.scale.y, m.scale.z = 1.5, 0.05, 0.5
+        m.scale.x, m.scale.y, m.scale.z = 0.05, 1.5, 0.5
         m.color = rgba(1.0, 1.0, 1.0, 1.0)
         return m
 
@@ -243,7 +243,7 @@ class RvizVisualizerNode(Node):
             tfs.append(self._make_tf('can_active', (p.x, p.y, p.z), stamp))
             tfs.append(self._make_tf(
                 'approach_point',
-                (p.x, p.y - APPROACH_OFFSET_Y, p.z),
+                (p.x - APPROACH_OFFSET_X, p.y, p.z),
                 stamp,
             ))
 

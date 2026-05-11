@@ -124,7 +124,7 @@
     script_sender_port="$(arg script_sender_port)"
     trajectory_port="$(arg trajectory_port)"
     >
-    <origin xyz="0 0 0.8" rpy="0 0 0"/>
+    <origin xyz="0 0 0.8" rpy="0 0 ${pi/2}"/>
   </xacro:ur_robot>
 
   <!-- ════════════════════════════════════════════════════════════════════

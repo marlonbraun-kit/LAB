@@ -6,17 +6,18 @@
     <chain base_link="base_link" tip_link="gripper_tcp_link"/>
   </group>
 
-  <!-- wait_forward: gripper_tcp_link at WAIT_TCP (0.30, 0.20, 0.35), facing +Y
-       (FORWARD_QUAT = (0, 0.7071, 0.7071, 0)). wrist_3 = +pi/2 branch, shared
+  <!-- wait_forward: gripper_tcp_link at WAIT_TCP (0.20, -0.30, 0.26) in base_link
+       (= world (0.30, 0.20, 1.06)), facing +X in base_link / +Y in world
+       (FORWARD_QUAT = (0.5, 0.5, 0.5, 0.5)). wrist_3 = +pi branch, shared
        by all pick-cycle IK solutions so no 2*pi joint jump occurs. Joint values
        below match config/initial_positions.yaml so spawn lands here. -->
   <group_state name="wait_forward" group="ur_manipulator">
-    <joint name="shoulder_pan_joint"  value="0.2210"/>
+    <joint name="shoulder_pan_joint"  value="4.9333890"/>
     <joint name="shoulder_lift_joint" value="-2.2994"/>
     <joint name="elbow_joint"         value="1.8025"/>
     <joint name="wrist_1_joint"       value="0.4969"/>
     <joint name="wrist_2_joint"       value="0.2210"/>
-    <joint name="wrist_3_joint"       value="1.5708"/>
+    <joint name="wrist_3_joint"       value="2.7052640"/>
   </group_state>
 
   <!-- home: legacy forward-facing pose at (0.418, 0.112, 0.402). wrist_3=+pi branch.

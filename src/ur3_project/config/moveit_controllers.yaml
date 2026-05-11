@@ -8,10 +8,9 @@ moveit_controller_manager: moveit_simple_controller_manager/MoveItSimpleControll
 
 moveit_simple_controller_manager:
   controller_names:
-    - joint_trajectory_controller
-    - gripper_controller
+    - scaled_joint_trajectory_controller
 
-  joint_trajectory_controller:
+  scaled_joint_trajectory_controller:
     type: FollowJointTrajectory
     action_ns: follow_joint_trajectory
     default: true
@@ -22,15 +21,5 @@ moveit_simple_controller_manager:
       - wrist_1_joint
       - wrist_2_joint
       - wrist_3_joint
-
-  # The gripper is exposed as JointGroupPositionController (Float64MultiArray
-  # commands), not as a FollowJointTrajectory action server. We therefore
-  # do NOT let MoveIt drive it directly — pick_place_manager publishes the
-  # finger commands itself. This entry is kept so the gripper joints are
-  # known to MoveIt for collision attachment.
-  gripper_controller:
-    type: GripperCommand
-    action_ns: gripper_cmd
-    default: false
-    joints:
-      - gripper_left_finger_joint
+  # Zimmer HRC-03 gripper is driven via /io_and_status_controller/set_io
+  # directly from pick_place_manager_node, not through MoveIt.

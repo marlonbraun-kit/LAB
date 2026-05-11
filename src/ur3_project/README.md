@@ -47,6 +47,43 @@ colcon build --packages-select ur3_project && source install/setup.bash
 
 ---
 
+## Real-robot setup
+
+Before the first launch on the physical UR3:
+
+1. **Install the driver and calibration tools:**
+   ```bash
+   sudo apt install ros-humble-ur-robot-driver ros-humble-ur-calibration \
+                    ros-humble-rqt-joint-trajectory-controller
+   ```
+
+2. **Network**: connect the laptop and robot via Ethernet on the same subnet
+   (the project default is `192.168.56.0/24`, robot at `192.168.56.101`,
+   laptop self-assigned). WiFi will not work — `ur_robot_driver` requires
+   real-time-capable connectivity.
+
+3. **ExternalControl URCap on the pendant**: open Polyscope →
+   *Installation → URCaps → External Control* and set **Host IP** to the
+   laptop's Ethernet IP. Create a program that includes the *External
+   Control* node. Press Play on this program after the ROS launch finishes
+   loading.
+
+4. **Extract the kinematic calibration** (one-time, robot-specific):
+   ```bash
+   ros2 launch ur_calibration calibration_correction.launch.py \
+     robot_ip:=192.168.56.101 \
+     target_filename:=/home/marlon/my_robot_calibration.yaml
+   ```
+   Without this the URDF uses generic UR3 DH parameters and TF/IK will be
+   off by centimetres.
+
+5. **Pre-position the robot**: before launching, freedrive the arm to
+   roughly the `wait_forward` configuration listed under "Named joint
+   configurations". The very first FSM transition (`MOVE_TO_WAIT`) is a
+   joint-space move that fails if the robot is in a different IK branch.
+
+---
+
 ## Run
 
 The launch file has three modes selected by two arguments (`rviz`, `debug`).
@@ -65,7 +102,9 @@ Argument summary:
 |---|---|---|
 | `rviz` | `false` | Start RViz alongside the pipeline. |
 | `debug` | `false` | Only meaningful with `rviz:=true`. Forces real hardware, swaps to the debug RViz config, and enables the step gate inside `pick_place_manager_node`. |
-| `fake_camera` | `auto` | `'auto'` starts `depth_camera_node` only in home-sim mode. `'true'`/`'false'` overrides regardless of the rviz/debug settings — set to `false` to silence the fake source while you publish `/target_can_pose` manually. |
+| `fake_camera` | `false` | `'true'` starts `depth_camera_node` as a fake `/target_can_pose` source; `'false'` never starts it; `'auto'` starts it only in home-sim mode. |
+| `robot_ip` | `192.168.56.101` | IP address of the UR3 controller (ignored in fake-hardware mode). |
+| `kinematics_params` | `/home/marlon/my_robot_calibration.yaml` | Path to the per-robot kinematic calibration YAML extracted via `ur_calibration` (see "Real-robot setup"). |
 
 Hardware-selection rule:
 
@@ -120,15 +159,15 @@ Manual-publish examples (testing at home):
 # fake "top" localisation scan (positions only)
 ros2 topic pub --once /target_can_pose ur3_interfaces/msg/CanDetectionArray \
   '{header: {frame_id: base_link}, detections: [
-    {position: {x: 0.30, y: 0.20, z: 0.06}, source: "top"},
-    {position: {x: 0.36, y: 0.16, z: 0.06}, source: "top"}
+    {position: {x: -0.25, y: -0.30, z: 0.06}, source: "top"},
+    {position: {x: -0.35, y: -0.30, z: 0.06}, source: "top"}
   ]}'
 
 # fake "front" identification scan (positions + classes)
 ros2 topic pub --once /target_can_pose ur3_interfaces/msg/CanDetectionArray \
   '{header: {frame_id: base_link}, detections: [
-    {class_name: "coke",  position: {x: 0.30, y: 0.20, z: 0.06}, source: "front"},
-    {class_name: "mahou", position: {x: 0.36, y: 0.16, z: 0.06}, source: "front"}
+    {class_name: "coke",  position: {x: -0.25, y: -0.30, z: 0.06}, source: "front"},
+    {class_name: "mahou", position: {x: -0.35, y: -0.30, z: 0.06}, source: "front"}
   ]}'
 
 # trigger the cycle
@@ -145,7 +184,7 @@ ros2 topic pub --once /clear_place_zone std_msgs/Empty '{}'
 
 | Node | Role | Key topics / services |
 |---|---|---|
-| `pick_place_manager_node` | State machine; calls MoveIt2 | pub `/pick_place_state`, pub `/gripper_controller/commands`, pub `/current_pick_target`, pub `/display_planned_path` (debug only); sub `/target_can_pose`, `/pick_command`, `/clear_place_zone`, `/human_proximity`; action `/move_action`, `/execute_trajectory`; srv `/compute_cartesian_path` |
+| `pick_place_manager_node` | State machine; calls MoveIt2 | pub `/pick_place_state`, pub `/gripper_controller/commands` (RViz-only visual mirror), pub `/current_pick_target`, pub `/display_planned_path` (debug only); sub `/target_can_pose`, `/pick_command`, `/clear_place_zone`, `/human_proximity`, `/joint_states`; action `/move_action`, `/execute_trajectory`; srv `/io_and_status_controller/set_io` (real gripper) |
 | `planning_scene_manager_node` | Keeps MoveIt planning scene in sync | sub `/target_can_pose` (CanDetectionArray), `/current_pick_target`, `/pick_place_state`; srv `/apply_planning_scene` |
 | `depth_camera_node` | Sim-only fake camera source | pub `/target_can_pose` (alternates `source="top"` and `source="front"`), pub `/camera/depth/image_raw` |
 | `rviz_visualizer_node` | Markers + TF for RViz | pub `/visualization_markers`, broadcasts TF `pick_zone`, `place_zone`, `can_active`, `approach_point` |
@@ -217,15 +256,26 @@ thin for the sampler. The correct orientation is achieved by:
 - Starting from a configuration already in the right IK branch
 - Using a tight goal orientation tolerance (0.05 rad ≈ 3°)
 
-### Cartesian paths for short straight-line segments
-`CARTESIAN_APPROACH`, `CARTESIAN_LIFT`, and `CARTESIAN_RETREAT` use
-`GetCartesianPath` with:
-- `max_step = 0.005 m` (5 mm waypoints)
-- `jump_threshold = 5.0` (prevents IK branch flips between waypoints — setting
-  this to 0 disables the check and produces curved, non-straight paths)
-- `min_fraction = 1.0` (reject any incomplete path)
-- `CARTESIAN_RETREAT` uses `avoid_collisions=False` because the TCP is right
-  next to the just-placed can and collision-aware IK fails on the first waypoint
+### Joint-space approach / lift / retreat (formerly Cartesian)
+The states `CARTESIAN_APPROACH`, `CARTESIAN_LIFT`, and `CARTESIAN_RETREAT`
+keep their historical names but their handlers (`joint_approach`,
+`joint_lift`, `joint_retreat` in `pick_place_manager_node.py`) now plan in
+joint space to pre-computed IK targets:
+
+- `joint_approach` → `q_grasp`
+- `joint_lift` → `q_lift`
+- `joint_retreat` → `q_retreat` (the high pre-place IK solution)
+
+These targets are produced as a seeded chain inside `_compute_pick_ik`
+(pregrasp → grasp → lift, then `_PLACE_SEED` → q_high → q_place), so each
+chain stays in a single wrist branch by construction. The TCP path between
+two joint targets is *almost* straight over short distances (≤ 12 cm).
+
+**Why not true Cartesian paths?** `GetCartesianPath` uses MoveIt's KDL IK
+plugin, which can flip wrist branches mid-path on a 6-DOF UR — this either
+truncates the path (jump-threshold rejection) or produces visibly erratic
+motion (jump-threshold disabled). Joint-space goals to seeded IK targets
+avoid the issue completely.
 
 ---
 
@@ -248,18 +298,17 @@ configured with `tip_link: gripper_tcp_link`.
 
 ### Orientation quaternions (in `base_link` frame)
 
-The robot is mounted with shoulder_pan rotated 90° from the canonical UR3
-spawn so the working direction is **+Y** in `base_link`. All TCP orientation
-quaternions reflect this.
+The robot is mounted such that the pick-zone working direction is **−Y**
+in `base_link`, and the place zone sits in the opposite XY quadrant. All
+TCP orientation quaternions reflect this.
 
 | Name | Value `(x,y,z,w)` | TCP Z-axis | Use |
 |---|---|---|---|
-| `FORWARD_QUAT` | `(0.0, 0.7071, 0.7071, 0.0)` | `[0,1,0]` +Y | Grasp, approach, carry, place |
-| `DOWN_QUAT`    | `(0.0, 1.0, 0.0, 0.0)` | `[0,0,−1]` | Wait poses (camera pointed down) |
+| `FORWARD_QUAT` | `(0.7071, 0.0, 0.0, 0.7071)` | `[0,−1,0]` −Y | Grasp, approach, carry, place |
+| `DOWN_QUAT`    | `(1.0, 0.0, 0.0, 0.0)` | `[0,0,−1]` | Wait poses (camera pointed down) |
 
-For `FORWARD_QUAT`: TCP-Z points along +Y (approach direction), TCP-Y points
-along +Z (fingers vertical). For `DOWN_QUAT`: TCP-Z points along −Z (down),
-TCP-Y along +Y so the wrist-mounted camera ends up on the +Y front side.
+For `FORWARD_QUAT`: TCP-Z points along −Y (approach direction). For
+`DOWN_QUAT`: TCP-Z points along −Z (down).
 
 ### Named joint configurations
 
@@ -275,33 +324,36 @@ This means `WAIT_TCP` (or `IDENTIFY_TCP`) can be edited without manually
 re-tuning every joint angle. If a value becomes unreachable from its seed the
 node logs an error and falls back to the seed itself.
 
-**Seeds (radians):**
+**Seeds (radians)** — see `pick_place_manager_node.py` for current values:
 
-`_WAIT_FORWARD_SEED` — TCP at `WAIT_TCP` facing +Y, wrist_3 = +π/2:
-```
-shoulder_pan: −0.2647   shoulder_lift: −1.2651   elbow:  1.0231
-wrist_1:       0.2420   wrist_2:       −0.2647   wrist_3: 1.5708
-```
+- `_WAIT_FORWARD_SEED` — wait pose facing the pickup zone.
+- `_WAIT_DOWN_SEED` — wait pose with camera pointed down over the pickup
+  zone.
+- `_PLACE_SEED` — **elbow-folded** branch over the place zone. Used to
+  seed the q_high IK (and therefore q_place via chain). This branch keeps
+  the upper arm clear of the table when reaching down to
+  `PLACE_TCP_Z < 0.15 m`. Without this seed the IK lands in the
+  elbow-up branch (same as the pickup) and the forearm/upper-arm scrapes
+  the table on the place descent.
 
-`_WAIT_DOWN_SEED` — TCP at `WAIT_TCP` pointing down, camera on +Y side:
-```
-shoulder_pan:  0.2711   shoulder_lift: −1.1688   elbow:  0.4602
-wrist_1:      −0.8622   wrist_2:       −1.5708   wrist_3: −2.8705
-```
+**Trajectory normalisation for joint wrap-around:**
+The UR controller reports joint positions continuously (no wrapping), so the
+robot's wrist_3 may report e.g. `+5.80` rad while the planned trajectory
+expects `−2.87` rad (same physical pose, off by 2π). Before sending each
+trajectory to the controller, `_normalize_trajectory_to_robot` shifts every
+waypoint by the nearest multiple of 2π so it's continuous with the robot's
+actual reported position. This avoids `PATH_TOLERANCE_VIOLATED` aborts.
 
-**All pick-cycle IK solutions share the wrist_3 ≈ +π/2 branch.** This is
-essential — a 2π jump in wrist_3 between consecutive trajectory points triggers
-`PATH_TOLERANCE_VIOLATED` in the controller. The two-stage IK in
-`_compute_cycle_ik` (high pre-place pose first, then low place pose seeded
-from it) keeps the entire cycle in this single branch.
-
-**Spawn pose** (`config/initial_positions.yaml`) matches the SRDF
-`wait_forward` named state so the robot boots already at `WAIT_FORWARD_JOINTS`:
+**Pre-positioning the robot before launch:** the FSM's first move is
+`MOVE_TO_WAIT`, a joint-space goal to `WAIT_DOWN_JOINTS`. If the robot is
+in a wildly different IK branch from the planner's expectation OMPL may
+fail to plan or the resulting motion can be unsafe. Use rqt's joint
+trajectory controller GUI for live debugging:
+```bash
+ros2 run rqt_joint_trajectory_controller rqt_joint_trajectory_controller
 ```
-shoulder_pan:  0.2210   shoulder_lift: −2.2994   elbow:  1.8025
-wrist_1:       0.4969   wrist_2:        0.2210   wrist_3: 1.5708
-gripper_left_finger_joint: 0.055   (gripper open)
-```
+This shows the current joint state and lets you drive the arm to a
+desired configuration (sliders → `scaled_joint_trajectory_controller`).
 
 ---
 
@@ -309,16 +361,15 @@ gripper_left_finger_joint: 0.055   (gripper open)
 
 | Parameter | Value | Meaning |
 |---|---|---|
-| `WAIT_TCP` | (0.30, 0.20, 0.26) | TCP position of both wait configurations |
-| `IDENTIFY_TCP` | (0.30, 0.09, 0.10) | TCP pose from which the wrist camera frames the pickup zone from the front |
-| `APPROACH_OFFSET_Y` | 0.08 m | Stand-off (in `−y`) from the can centre during pre-grasp |
-| `LIFT_Z` | 0.12 m | Height of Cartesian lift / retreat above the can |
-| `PLACE_ZONE_CENTER` | (−0.30, 0.20) | Centre of the 2x2 place grid in XY |
+| `WAIT_TCP` | (−0.30, −0.20, 0.26) | TCP position of both wait configurations |
+| `IDENTIFY_TCP` | (−0.30, −0.09, 0.10) | TCP pose from which the wrist camera frames the pickup zone from the front |
+| `APPROACH_OFFSET_Y` | −0.08 m | Stand-off in y from the can centre during pre-grasp (sign matches working direction) |
+| `LIFT_Z` | 0.12 m | Vertical height of the lift / retreat above the can |
+| `PLACE_ZONE_CENTER` | (0.30, −0.20) | Centre of the 2x2 place grid in XY |
 | `PLACE_GRID_SPACING` | 0.12 m | Centre-to-centre spacing between adjacent slots |
-| `PLACE_TCP_Z` | 0.15 m | TCP height when placing (can bottom ≈ 2 cm above the table) |
-| Slot fill order | back-left → back-right → front-left → front-right | "back" = +Y |
+| `PLACE_TCP_Z` | 0.10 m | TCP height when placing (can bottom ≈ 2 cm above the table) |
 | `HUMAN_PROXIMITY_THRESHOLD` | 0.5 | Below this, next motion uses 0.5 × normal speed |
-| Pick zone | (0.30, 0.20) XY | Marker only — actual positions come from the top-camera scan |
+| Pick zone XY | from `/target_can_pose` (top scan) | actual positions come from the camera, not a hard-coded value |
 
 ---
 
@@ -334,11 +385,12 @@ gripper_left_finger_joint: 0.055   (gripper open)
     behind the robot
   - SRDF disables `base_link`/`base_link_inertia` ↔ `table_top` collision pairs
     so the flush mount does not register as a permanent collision.
-- **Dynamic objects** (refreshed at 2 Hz):
-  - `can_<i>`: one cylinder (r=0.040 m, h=0.130 m) per detection in the
-    last `/target_can_pose` array. The active target — designated via
-    `/current_pick_target` — is suppressed during the approach so the planner
-    can drive into the can's location.
+- **Dynamic objects:** none. Cans are *not* modelled in the collision world.
+  They are treated as visual markers only (lightweight, harmless if grazed).
+  The previous attach/detach/suppress logic added more failure modes than it
+  prevented (planning-scene races during retreat caused MoveIt to abort with
+  start-state-in-collision errors). RViz-side markers for cans still come
+  from `rviz_visualizer_node`.
 
 **Static-environment collision avoidance:**  
 Robot-vs-environment collisions are checked by MoveIt/FCL against the actual
@@ -346,13 +398,6 @@ UR3 collision meshes already referenced by the URDF (`ur_description`'s
 per-link convex hulls). No manual link-thickness tuning is required — adding
 the `table_top` and `backboard` boxes as `CollisionObject`s is enough for OMPL
 to route the entire arm geometry around them.
-
-**Can suppression during approach:**  
-When the state machine enters `PLAN_TO_PREGRASP` the target can is removed from
-the scene so OMPL/IK can freely plan the arm into the can's location. The can is
-re-added as a free object when the state returns to `ORIENT_FORWARD` (start of
-next cycle). While grasped, the can is attached to `gripper_base_link` as an
-`AttachedCollisionObject` (touch links: gripper base + both fingers).
 
 ---
 

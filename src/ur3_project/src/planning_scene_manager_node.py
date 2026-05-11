@@ -48,8 +48,8 @@ TABLE_ID = 'table_top'
 TABLE_SIZE = (1.5, 0.8, 0.05)
 TABLE_POS = (0.0, 0.0, -0.025)
 BACKBOARD_ID = 'backboard'
-BACKBOARD_SIZE = (1.5, 0.05, 0.5)
-BACKBOARD_POS = (0.0, -0.325, 0.25)
+BACKBOARD_SIZE = (0.05, 1.5, 0.5)
+BACKBOARD_POS = (-0.325, 0.0, 0.25)
 
 ACTIVE_TARGET_ID = 'target_can'
 ATTACH_LINK = 'gripper_base_link'
@@ -149,15 +149,10 @@ class PlanningSceneManagerNode(Node):
             return
         self.last_state = new_state
 
-        if new_state == 'GRASP' and not self.target_attached:
-            self._attach_target()
-        elif new_state == 'RELEASE' and self.target_attached:
-            self._detach_target()
-        elif new_state == 'PLAN_TO_PREGRASP' and not self.target_attached:
-            self.target_suppressed = True
-            self._remove_active_object()
-        elif new_state in ('NEXT_TARGET', 'WAIT_FOR_COMMAND', 'AFTER_RETREAT'):
-            self.target_suppressed = False
+        # Cans are not modelled in the collision world (they're light and
+        # treated as visual markers only) — no attach/detach/suppress logic
+        # is needed. Pose is left here as a no-op for clarity.
+        _ = new_state
 
     # ---------------------------------------------------------------- scene ops
     def _refresh_scene(self):
@@ -183,18 +178,12 @@ class PlanningSceneManagerNode(Node):
             ap = self.active_target_pose.pose.position
             active_pos = (ap.x, ap.y, ap.z)
 
-        for idx, (x, y, z) in enumerate(self.detections):
-            # Skip the active target while it's suppressed (during approach)
-            # or attached (while held in the gripper).
-            if active_pos is not None and (self.target_suppressed or self.target_attached):
-                if math.hypot(x - active_pos[0], y - active_pos[1]) < ACTIVE_MATCH_DIST:
-                    continue
-            obj_id = f'can_{idx}'
-            new_ids.add(obj_id)
-            world.collision_objects.append(
-                make_cylinder(obj_id, self.detections_frame, (x, y, z),
-                              CAN_RADIUS, CAN_HEIGHT)
-            )
+        # Cans are not added as collision objects: they're light, knocking one
+        # over isn't damaging, and modelling them caused the joint-space
+        # approach/retreat paths to fail when the planner couldn't avoid the
+        # placed can. The active target is still attached to the gripper
+        # while held, see _attach_target().
+        _ = (active_pos,)  # silence unused-warning when this branch is empty
 
         # Remove any stale ids that disappeared since the last refresh.
         for old in self._published_ids - new_ids:

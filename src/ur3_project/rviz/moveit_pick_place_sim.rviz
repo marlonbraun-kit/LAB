@@ -8,7 +8,7 @@ Panels:
         - /RobotModel1
         - /MarkerArray1
       Splitter Ratio: 0.5
-    Tree Height: 358
+    Tree Height: 500
   - Class: rviz_common/Selection
     Name: Selection
   - Class: rviz_common/Views
@@ -216,39 +216,39 @@ Visualization Manager:
   Views:
     Current:
       Class: rviz_default_plugins/Orbit
-      Distance: 2.5
+      Distance: 1.4992384910583496
       Enable Stereo Rendering:
         Stereo Eye Separation: 0.05999999865889549
         Stereo Focal Distance: 1
         Swap Stereo Eyes: false
         Value: false
       Focal Point:
-        X: 0.30000001192092896
-        Y: 0
-        Z: 0.800000011920929
+        X: 0.03659685701131821
+        Y: 0.05140728875994682
+        Z: 0.8330928683280945
       Focal Shape Fixed Size: true
       Focal Shape Size: 0.05000000074505806
       Invert Z Axis: false
       Name: Current View
       Near Clip Distance: 0.009999999776482582
-      Pitch: 0.4000000059604645
+      Pitch: 0.20500022172927856
       Target Frame: world
       Value: Orbit (rviz)
-      Yaw: 0.8999999761581421
+      Yaw: 2.6150124073028564
     Saved: ~
 Window Geometry:
   DepthImage:
     collapsed: false
   Displays:
-    collapsed: false
-  Height: 900
-  Hide Left Dock: false
+    collapsed: true
+  Height: 1135
+  Hide Left Dock: true
   Hide Right Dock: false
-  QMainWindow State: 000000ff00000000fd0000000100000000000001cb0000032afc0200000004fb00000014004400650070007400680049006d006100670065000000003d000000d30000002800fffffffb000000100044006900730070006c006100790073010000003d000001e9000000c900fffffffb0000001200530065006c0065006300740069006f006e00000002180000008d0000005c00fffffffb0000000a00560069006500770073010000022c0000013b000000a400ffffff000003a70000032a00000004000000040000000800000008fc0000000100000002000000010000000a0054006f006f006c00730100000000ffffffff0000000000000000
+  QMainWindow State: 000000ff00000000fd0000000100000000000001cb00000415fc0200000004fb00000014004400650070007400680049006d006100670065000000003d000000d30000002800fffffffb000000100044006900730070006c006100790073000000003d00000277000000c900fffffffb0000001200530065006c0065006300740069006f006e00000002180000008d0000005c00fffffffb0000000a0056006900650077007300000002ba00000198000000a400ffffff000005e20000041500000004000000040000000800000008fc0000000100000002000000010000000a0054006f006f006c00730100000000ffffffff0000000000000000
   Selection:
     collapsed: false
   Views:
-    collapsed: false
-  Width: 1400
+    collapsed: true
+  Width: 1506
   X: 70
   Y: 27

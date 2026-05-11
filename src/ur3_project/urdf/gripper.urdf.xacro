@@ -69,8 +69,8 @@
     </link>
 
     <joint name="${prefix}gripper_base_joint" type="fixed">
-      <!-- -90 deg about end-effector Z aligns fingers with the camera orientation -->
-      <origin xyz="0 0 0" rpy="0 0 -1.5707963"/>
+      <!-- -180 + 25 = -155 deg about end-effector Z (matches real robot mounting) -->
+      <origin xyz="0 0 0" rpy="0 0 -2.7052604"/>
       <parent link="${parent}"/>
       <child  link="${prefix}gripper_base_link"/>
     </joint>

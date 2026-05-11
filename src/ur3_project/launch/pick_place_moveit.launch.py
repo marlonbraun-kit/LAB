@@ -79,11 +79,25 @@ def generate_launch_description():
                          "/target_can_pose source; 'false' to never start it; "
                          "'auto' (default) starts it only in home-sim mode "
                          "(rviz:=true and debug:=false).")),
+        DeclareLaunchArgument(
+            'robot_ip', default_value='169.254.12.28',
+            description='IP address of the UR3 controller (ignored in fake-hardware mode).'),
+        DeclareLaunchArgument(
+            'kinematics_params',
+            default_value='/home/marlon/my_robot_calibration.yaml',
+            description='Path to the robot-specific kinematic calibration YAML.'),
     ]
 
     use_fake_hardware = PythonExpression([
         "'true' if '", rviz_arg, "'.lower() == 'true' and '",
         debug_arg, "'.lower() != 'true' else 'false'"
+    ])
+
+    # On real hardware, hold the FSM in WAIT_FOR_ROBOT until the URCap
+    # External Control program is running and the reverse interface is up.
+    # In fake-hardware mode, that topic never publishes, so disable the gate.
+    wait_for_robot_program = PythonExpression([
+        "'true' if '", use_fake_hardware, "'.lower() != 'true' else 'false'"
     ])
 
     # fake_camera resolution: 'auto' -> equal to use_fake_hardware logic.
@@ -106,6 +120,11 @@ def generate_launch_description():
         ' sim_gazebo:=false',
         ' sim_ignition:=false',
         ' use_fake_hardware:=', use_fake_hardware,
+        ' robot_ip:=', LaunchConfiguration('robot_ip'),
+        ' kinematics_params:=', LaunchConfiguration('kinematics_params'),
+        ' script_filename:=/opt/ros/humble/share/ur_robot_driver/resources/ros_control.urscript',
+        ' output_recipe_filename:=/opt/ros/humble/share/ur_robot_driver/resources/rtde_output_recipe.txt',
+        ' input_recipe_filename:=/opt/ros/humble/share/ur_robot_driver/resources/rtde_input_recipe.txt',
     ])
     robot_description = {'robot_description': ParameterValue(robot_description_content, value_type=str)}
 
@@ -132,8 +151,8 @@ def generate_launch_description():
 
     trajectory_execution = {
         'moveit_manage_controllers': True,
-        'trajectory_execution.allowed_execution_duration_scaling': 1.5,
-        'trajectory_execution.allowed_goal_duration_margin': 0.5,
+        'trajectory_execution.allowed_execution_duration_scaling': 10.0,
+        'trajectory_execution.allowed_goal_duration_margin': 10.0,
         'trajectory_execution.allowed_start_tolerance': 0.05,
     }
     planning_scene_monitor = {
@@ -168,7 +187,13 @@ def generate_launch_description():
         )
 
     spawn_jsb = spawner('joint_state_broadcaster')
-    spawn_jtc = spawner('joint_trajectory_controller')
+    spawn_jtc = spawner('scaled_joint_trajectory_controller')
+    # Zimmer HRC-03 is driven via /io_and_status_controller/set_io.
+    # The gripper_controller (position controller for the finger joints)
+    # is kept solely so RViz can visualise open/close — pick_place_manager
+    # publishes a Float64MultiArray with the same value to drive the
+    # mock_components-backed gripper joints.
+    spawn_io = spawner('io_and_status_controller')
     spawn_gripper = spawner('gripper_controller')
 
     move_group = Node(
@@ -192,7 +217,6 @@ def generate_launch_description():
     rviz = Node(
         package='rviz2',
         executable='rviz2',
-        condition=IfCondition(rviz_arg),
         arguments=['-d', rviz_config_file],
         parameters=[
             robot_description,
@@ -207,19 +231,29 @@ def generate_launch_description():
     )
     pick_place_manager = Node(
         package=pkg, executable='pick_place_manager_node.py', output='screen',
-        parameters=[{'debug_step': debug_arg}],
+        parameters=[{
+            'debug_step': debug_arg,
+            'wait_for_robot_program': wait_for_robot_program,
+        }],
         emulate_tty=True,
     )
     depth_camera = Node(
         package=pkg, executable='depth_camera_node.py', output='log',
-        condition=IfCondition(fake_camera_enabled),
+        condition=IfCondition(
+            PythonExpression([
+                "'true' if ('", rviz_arg, "'.lower() == 'true' and '",
+                debug_arg, "'.lower() == 'true') or ('",
+                rviz_arg, "'.lower() == 'false' and '",
+                debug_arg, "'.lower() == 'false') else 'false'"
+            ])
+        ),
     )
     rviz_visualizer = Node(
         package=pkg, executable='rviz_visualizer_node.py', output='log',
     )
 
     jtc_after_jsb = RegisterEventHandler(
-        OnProcessExit(target_action=spawn_jsb, on_exit=[spawn_jtc, spawn_gripper])
+        OnProcessExit(target_action=spawn_jsb, on_exit=[spawn_jtc, spawn_gripper, spawn_io])
     )
     move_group_after_jtc = RegisterEventHandler(
         OnProcessExit(target_action=spawn_jtc, on_exit=[

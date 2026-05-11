@@ -1,4 +1,6 @@
 from setuptools import setup
+import os
+from glob import glob
 
 package_name = 'ur3_project'
 
@@ -9,6 +11,7 @@ setup(
     data_files=[
         ('share/ament_index/resource_index/packages', ['resource/' + package_name]),
         ('share/' + package_name, ['package.xml']),
+        (os.path.join('lib', package_name), glob('scripts/*.py')),
     ],
     install_requires=['setuptools'],
     zip_safe=True,

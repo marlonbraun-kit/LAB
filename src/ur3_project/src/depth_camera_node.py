@@ -22,106 +22,100 @@ from rclpy.node import Node
 
 from geometry_msgs.msg import Point
 from sensor_msgs.msg import Image
-from std_msgs.msg import Header
+from std_msgs.msg import Header, Bool
+from cv_bridge import CvBridge
+import cv2
+import mediapipe as mp
+import math
 
-from ur3_interfaces.msg import CanDetection, CanDetectionArray
-
-
-class DepthCameraNode(Node):
-    IMAGE_W = 160
-    IMAGE_H = 120
-
-    # Default fake cans laid out inside the pickup zone (around 0.30, 0.20).
-    DEFAULT_CANS = [
-        ('coke',  (0.30,  0.20, 0.06)),
-        ('mahou', (0.36,  0.16, 0.06)),
-        ('fanta', (0.24,  0.24, 0.06)),
-    ]
-
+class SafetyShieldNode(Node):
     def __init__(self):
-        super().__init__('depth_camera_node')
-
-        # Each entry can be overridden via parameters fake_can_<i>_{class,x,y,z}.
-        self._cans = []
-        for i, (cls, (x, y, z)) in enumerate(self.DEFAULT_CANS):
-            self.declare_parameter(f'fake_can_{i}_class', cls)
-            self.declare_parameter(f'fake_can_{i}_x', float(x))
-            self.declare_parameter(f'fake_can_{i}_y', float(y))
-            self.declare_parameter(f'fake_can_{i}_z', float(z))
-            self._cans.append(i)
-
-        self.declare_parameter('publish_rate_hz', 1.0)
-        self.declare_parameter('frame_id', 'base_link')
-
-        self.detection_pub = self.create_publisher(
-            CanDetectionArray, '/target_can_pose', 10
-        )
+        super().__init__('safety_shield_node')
+        
+        # Subscriber (Raw video input)
+        self.subscription = self.create_subscription(
+            Image, '/camera/image_raw', self.image_callback, 10)
+        
+        # Declare parameter with default value
+        self.declare_parameter('mirror_image', True)
+            
+        # Publisher 1 (Boolean output for the robot)
+        self.safety_pub = self.create_publisher(Bool, '/target_can_pose', 10)
+        
+        # Publisher 2 (Processed video output)
         self.image_pub = self.create_publisher(Image, '/camera/depth/image_raw', 10)
+            
+        self.cv_bridge = CvBridge()
+        self.mp_hands = mp.solutions.hands
+        self.mp_drawing = mp.solutions.drawing_utils
+        
+        # Allow up to 2 hands
+        self.hands = self.mp_hands.Hands(model_complexity=0, max_num_hands=2)
+        
+        self.PROXIMITY_THRESHOLD = 150
+        self.get_logger().info('Safety shield activated. Streaming video...')
 
-        rate = float(self.get_parameter('publish_rate_hz').value)
-        # Two phases per period: top, then front.
-        self._phase = 'top'
-        self.create_timer(1.0 / max(rate, 0.1), self._publish)
+    def image_callback(self, msg):
+        try:
+            cv_image = self.cv_bridge.imgmsg_to_cv2(msg, desired_encoding='bgr8')
+        except Exception: return
 
-        self.get_logger().info(
-            'Fake depth/camera source started '
-            f'({len(self._cans)} cans, alternating top/front scans).'
-        )
+        # Read parameter and mirror the image if necessary
+        mirror = self.get_parameter('mirror_image').value
+        if mirror:
+            cv_image = cv2.flip(cv_image, 1) # Horizontal flip (mirror)
 
-    def _build_detections(self, source):
-        frame_id = str(self.get_parameter('frame_id').value)
-        msg = CanDetectionArray()
-        msg.header = Header()
-        msg.header.stamp = self.get_clock().now().to_msg()
-        msg.header.frame_id = frame_id
+        # MediaPipe requires RGB images for processing
+        image_rgb = cv2.cvtColor(cv_image, cv2.COLOR_BGR2RGB)
+        results = self.hands.process(image_rgb)
+        
+        safety_msg = Bool()
+        safety_msg.data = False 
+        
+        # Default text (Safe)
+        texto_estado = "ESTADO: SEGURO"
+        color_texto = (0, 255, 0) # Green in BGR
 
-        for i in self._cans:
-            cls = str(self.get_parameter(f'fake_can_{i}_class').value)
-            x = float(self.get_parameter(f'fake_can_{i}_x').value)
-            y = float(self.get_parameter(f'fake_can_{i}_y').value)
-            z = float(self.get_parameter(f'fake_can_{i}_z').value)
-            det = CanDetection()
-            det.header = msg.header
-            det.id = f'fake_{i}'
-            det.class_name = cls if source == 'front' else ''
-            det.confidence = 1.0
-            det.position = Point(x=x, y=y, z=z)
-            det.source = source
-            msg.detections.append(det)
+        if results.multi_hand_landmarks:
+            # Iterate over all detected hands
+            for hand in results.multi_hand_landmarks:
+                
+                # Draw skeleton of the hand
+                self.mp_drawing.draw_landmarks(
+                    cv_image, hand, self.mp_hands.HAND_CONNECTIONS)
+                
+                # Calculate distance of the hand
+                p0 = hand.landmark[0]
+                p9 = hand.landmark[9]
+                h, w, _ = cv_image.shape
+                dist_px = math.sqrt(((p0.x - p9.x)*w)**2 + ((p0.y - p9.y)*h)**2)
 
-        return msg, frame_id
+                # If any hand exceeds the threshold, trigger danger
+                if dist_px > self.PROXIMITY_THRESHOLD:
+                    safety_msg.data = True
+                    texto_estado = "PELIGRO: PARADA!"
+                    color_texto = (0, 0, 255) # Red in BGR
+                
+        # Write text on the image
+        cv2.putText(cv_image, texto_estado, (50, 50), 
+                    cv2.FONT_HERSHEY_SIMPLEX, 1.5, color_texto, 3, cv2.LINE_AA)
 
-    def _publish(self):
-        msg, frame_id = self._build_detections(self._phase)
-        self.detection_pub.publish(msg)
-        self.image_pub.publish(self._make_depth_image(frame_id))
-        # Alternate every tick.
-        self._phase = 'front' if self._phase == 'top' else 'top'
-
-    def _make_depth_image(self, frame_id):
-        rows = np.tile(np.linspace(64, 200, self.IMAGE_W, dtype=np.uint8), (self.IMAGE_H, 1))
-        img = Image()
-        img.header.stamp = self.get_clock().now().to_msg()
-        img.header.frame_id = frame_id
-        img.height = self.IMAGE_H
-        img.width = self.IMAGE_W
-        img.encoding = 'mono8'
-        img.is_bigendian = 0
-        img.step = self.IMAGE_W
-        img.data = rows.tobytes()
-        return img
-
+        # Publish data
+        self.safety_pub.publish(safety_msg)
+        
+        try:
+            # Publish the final video with drawings
+            ros_image_msg = self.cv_bridge.cv2_to_imgmsg(cv_image, encoding="bgr8")
+            self.image_pub.publish(ros_image_msg)
+        except Exception as e:
+            pass
 
 def main(args=None):
     rclpy.init(args=args)
-    node = DepthCameraNode()
-    try:
-        rclpy.spin(node)
-    except KeyboardInterrupt:
-        pass
+    node = SafetyShieldNode()
+    rclpy.spin(node)
     node.destroy_node()
     rclpy.shutdown()
-
 
 if __name__ == '__main__':
     main()

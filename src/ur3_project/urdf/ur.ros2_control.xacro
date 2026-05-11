@@ -140,24 +140,6 @@
         <state_interface name="effort"/>
       </joint>
 
-      <!-- Gripper finger joints — always included when include_gripper is set,
-           regardless of sim or fake-hardware mode. -->
-      <xacro:if value="${include_gripper}">
-        <joint name="gripper_left_finger_joint">
-          <command_interface name="position"/>
-          <state_interface name="position">
-            <param name="initial_value">0.02</param>
-          </state_interface>
-          <state_interface name="velocity"/>
-        </joint>
-        <joint name="gripper_right_finger_joint">
-          <command_interface name="position"/>
-          <state_interface name="position">
-            <param name="initial_value">0.02</param>
-          </state_interface>
-          <state_interface name="velocity"/>
-        </joint>
-      </xacro:if>
 
       <xacro:unless value="${sim_gazebo or sim_ignition}">
         <sensor name="${tf_prefix}tcp_fts_sensor">
@@ -403,6 +385,34 @@
       </xacro:unless>
 
     </ros2_control>
+
+    <!-- Gripper finger joints in a separate ros2_control block so they are
+         never passed to URPositionHardwareInterface, which only handles the
+         6 UR arm joints. mock_components/GenericSystem acts as a passthrough
+         (commands echoed back as state) regardless of real/fake/sim mode. -->
+    <xacro:if value="${include_gripper}">
+      <ros2_control name="gripper" type="system">
+        <hardware>
+          <plugin>mock_components/GenericSystem</plugin>
+          <param name="fake_sensor_commands">false</param>
+          <param name="state_following_offset">0.0</param>
+        </hardware>
+        <joint name="gripper_left_finger_joint">
+          <command_interface name="position"/>
+          <state_interface name="position">
+            <param name="initial_value">0.02</param>
+          </state_interface>
+          <state_interface name="velocity"/>
+        </joint>
+        <joint name="gripper_right_finger_joint">
+          <command_interface name="position"/>
+          <state_interface name="position">
+            <param name="initial_value">0.02</param>
+          </state_interface>
+          <state_interface name="velocity"/>
+        </joint>
+      </ros2_control>
+    </xacro:if>
 
   </xacro:macro>
 

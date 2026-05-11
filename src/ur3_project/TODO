@@ -1,0 +1,9 @@
+Find out which pin actuates gripper (no pin=0 and fun=1)
+Find out if open is 0 or 1
+
+
+
+DONE:
+Fix bug with open gripper at launch
+Fix bug with failing cartesian (probably open gripper bug or wrong seed)
+Add seed bfore preplace
