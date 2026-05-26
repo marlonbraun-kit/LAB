@@ -2,8 +2,10 @@
 
 **Gripper: Zimmer HRC 03** (2-finger parallel gripper, mounted on UR3 flange via adapter plate)
 
-ROS 2 Humble package that drives a UR3 robot arm through a full
+ROS 2 Humble package that drives a **UR3e** robot arm through a full
 pick-and-place cycle using MoveIt2 (OMPL + KDL IK + Cartesian path service).
+The package directory is named `ur3_project` for historical reasons — the
+URDF (`ur_type:=ur3e`) and the Python FK both use UR3e DH parameters.
 
 ---
 
@@ -119,17 +121,13 @@ the real robot.
 ### Step gate (debug mode)
 
 When `debug:=true` is passed, `pick_place_manager_node` receives the parameter
-`debug_step:=true` and gates every motion behind two Enter presses on the
-launching terminal:
+`debug_step:=true` and gates the FSM between motions:
 
-1. Plan only — `MoveGroup` is invoked with `plan_only=True` (joint goals) or
-   the existing `GetCartesianPath` path is republished on
-   `/display_planned_path`. The Trajectory display in RViz shows the ghost
-   robot.
-2. **Press Enter** → cached trajectory is sent to `/execute_trajectory`. The
-   real robot moves.
-3. **Press Enter** → the FSM transitions to the next state, which plans the
-   next segment.
+1. `MoveGroup` plans+executes each segment in a single shot (no ghost preview —
+   the previous `plan_only=True` ghost was misleading because of KDL branch
+   flips between the planned and executed trajectory and was removed).
+2. **Press Enter** → the FSM transitions to the next state, which triggers the
+   next plan+execute.
 
 In any non-debug mode the gate is a no-op and `MoveGroup` plans+executes in a
 single shot.
@@ -145,7 +143,7 @@ in sim mode):
 
 | Topic | Type | Direction | Notes |
 |---|---|---|---|
-| `/front_detections` | `ur3_interfaces/CanDetectionArray` | `native_vision_node` → manager | detections in `camera_optical_link`. Each carries `class_name` + 3D position. The manager TF-transforms to `base_link`, overrides z with `FIXED_CAN_Z = 0.06 m`, and republishes on `/target_can_pose` for the rest of the stack. |
+| `/front_detections` | `ur3_interfaces/CanDetectionArray` | `native_vision_node` → manager | detections in `camera_optical_link`. Each carries `class_id` (YOLO index: 0=beer, 1=coke, 2=lemon, 3=orange) + 3D position. The manager TF-transforms to `base_link`, overrides z with `FIXED_CAN_Z = 0.06 m`, and republishes on `/target_can_pose` for the rest of the stack. |
 | `/target_can_pose` | `ur3_interfaces/CanDetectionArray` | manager → planning_scene / rviz_visualizer | internal canonical detection stream (`base_link`). The sim-only `depth_camera_node` publishes here directly. |
 | `/human_proximity` | `std_msgs/Float32` | external → manager | `0.0` = hand close (danger), `1.0` = safe. Below `HUMAN_PROXIMITY_THRESHOLD = 0.5` the next motion segment uses 0.5 × normal vel/acc scaling. |
 
@@ -153,22 +151,25 @@ in sim mode):
 
 | Topic | Type | Notes |
 |---|---|---|
-| `/pick_command` | `std_msgs/String` | comma-separated classes, e.g. `"coke,mahou"`. Only honoured while the manager is in `WAIT_FOR_COMMAND`. |
+| `/order` | `std_msgs/String` | one line per type, format `"type: <class>, amount: <N>"`, e.g. `"type: coke, amount: 1"`. Valid types: `beer`, `coke`, `lemon`, `orange`. A single logical order may publish multiple messages back-to-back (one per type); the manager collects all messages that arrive while in `WAIT_FOR_COMMAND` and starts the cycle ~0.7 s after the last one (`ORDER_DEBOUNCE_S`). Messages received during a cycle are ignored. |
 | `/clear_place_zone` | `std_msgs/Empty` | resets the 2x2 place-slot map so future picks fill from slot 0 again. |
 
 Manual-publish examples (testing at home):
 
 ```bash
-# fake identification: provide class + position directly in base_link.
+# fake identification: provide class_id + position directly in base_link.
+# class_id: 0=beer, 1=coke, 2=lemon, 3=orange.
 # z is ignored by the manager — every can is treated as sitting at FIXED_CAN_Z.
 ros2 topic pub --once /target_can_pose ur3_interfaces/msg/CanDetectionArray \
   '{header: {frame_id: base_link}, detections: [
-    {class_name: "coke",  position: {x: 0.20, y: -0.25, z: 0.06}, source: "front"},
-    {class_name: "mahou", position: {x: 0.20, y: -0.35, z: 0.06}, source: "front"}
+    {class_id: 1, position: {x: 0.20, y: -0.25, z: 0.06}, source: "front"},
+    {class_id: 0, position: {x: 0.20, y: -0.35, z: 0.06}, source: "front"}
   ]}'
 
-# trigger the cycle
-ros2 topic pub --once /pick_command std_msgs/String '{data: "coke,mahou"}'
+# trigger the cycle — one message per type. Send back-to-back; the manager
+# debounces them (~0.7 s) and starts the cycle once all lines are in.
+ros2 topic pub --once /order std_msgs/String '{data: "type: coke, amount: 1"}'
+ros2 topic pub --once /order std_msgs/String '{data: "type: beer, amount: 1"}'
 
 # simulate human approach
 ros2 topic pub --once /human_proximity std_msgs/Float32 '{data: 0.0}'
@@ -181,7 +182,7 @@ ros2 topic pub --once /clear_place_zone std_msgs/Empty '{}'
 
 | Node | Role | Key topics / services |
 |---|---|---|
-| `pick_place_manager_node` | State machine; calls MoveIt2; bridges `/front_detections` → `/target_can_pose` | pub `/pick_place_state`, `/gripper_controller/commands` (RViz-only visual mirror), `/current_pick_target`, `/target_can_pose`, `/display_planned_path` (debug only); sub `/target_can_pose`, `/front_detections`, `/pick_command`, `/clear_place_zone`, `/human_proximity`, `/joint_states`; uses TF `camera_optical_link → base_link`; action `/move_action`, `/execute_trajectory`; srv `/io_and_status_controller/set_io` (real gripper) |
+| `pick_place_manager_node` | State machine; calls MoveIt2; bridges `/front_detections` → `/target_can_pose` | pub `/pick_place_state`, `/gripper_controller/commands` (RViz-only visual mirror), `/current_pick_target`, `/target_can_pose`; sub `/target_can_pose`, `/front_detections`, `/order`, `/clear_place_zone`, `/human_proximity`, `/joint_states`; uses TF `camera_optical_link → base_link`; action `/move_action`, `/execute_trajectory`; srv `/io_and_status_controller/set_io` (real gripper) |
 | `planning_scene_manager_node` | Keeps MoveIt planning scene in sync | sub `/target_can_pose` (CanDetectionArray), `/current_pick_target`, `/pick_place_state`; srv `/apply_planning_scene` |
 | `native_vision_node` | Real RealSense SR305 + YOLO (only on real robot) | pub `/front_detections` (`source="front"`, `frame_id="camera_optical_link"`, 30 Hz) |
 | `depth_camera_node` | Sim-only fake camera source (only with `fake_camera:=true`) | pub `/target_can_pose` (`source="front"`), pub `/camera/depth/image_raw` |
@@ -208,14 +209,21 @@ ros2_control_node + robot_state_publisher
 
 ```
 BOOT
- └─ MOVE_TO_WAIT          joint-space: arm → WAIT_DOWN_JOINTS  (camera looks down)
- └─ WAIT_FOR_COMMAND      hold until /pick_command (e.g. "coke,mahou")
+ └─ MOVE_TO_WAIT          joint-space: arm → WAIT_FORWARD_JOINTS
+ └─ WAIT_FOR_COMMAND      hold until /order (e.g. "type: coke, amount: 1")
  └─ ORIENT_FORWARD        joint-space: arm → WAIT_FORWARD_JOINTS
  └─ MOVE_TO_IDENTIFY      joint-space: arm → IDENTIFY_JOINTS
+                          (FORWARD_QUAT IK at IDENTIFY_TCP)
+ └─ ROTATE_FOR_IDENTIFY   joint-space: wrist_3 += +π/2 about wrist_3_link Z
+                          (camera frames the cans from the side)
  └─ IDENTIFY_FROM_FRONT   wait for /front_detections (native_vision_node).
-                          Each detection already carries class_name + xy;
+                          Each detection already carries class_id + xy;
                           z is fixed to FIXED_CAN_Z and the orientation is
                           always FORWARD_QUAT (no per-can pose estimation).
+ └─ ROTATE_BACK_FROM_IDENTIFY
+                          joint-space: wrist_3 back to FORWARD_QUAT branch,
+                          so pregrasp IK seeds from the canonical wrist
+                          branch.
  ┌─→ NEXT_TARGET          pop next class from queue, pick the next free
  │                        place-zone slot, solve IK chain
  │ └─ PLAN_TO_PREGRASP
@@ -228,7 +236,7 @@ BOOT
  └── AFTER_RETREAT (loop back to NEXT_TARGET)
  └─ ALL_DONE               command queue empty (or place zone full)
  └─ ORIENT_DOWN_AT_WAIT
- └─ WAIT_FOR_COMMAND       (cycle ready for the next /pick_command)
+ └─ WAIT_FOR_COMMAND       (cycle ready for the next /order)
 ```
 
 Any motion failure aborts the remaining queue and falls back to
@@ -243,7 +251,7 @@ four slots before testing a fresh run.
 
 ### Joint-space goals for named poses
 `MOVE_TO_WAIT`, `ORIENT_FORWARD`, and `ORIENT_DOWN_AT_WAIT` use explicit
-`JointConstraint` goals (`WAIT_DOWN_JOINTS` / `WAIT_FORWARD_JOINTS`) instead of
+`JointConstraint` goals (`WAIT_FORWARD_JOINTS`) instead of
 pose goals. This eliminates IK branch ambiguity: OMPL plans directly in joint
 space to a single known configuration and can never over-rotate the base joint.
 
@@ -295,6 +303,16 @@ All named joint configurations and quaternion constants in
 `gripper_tcp_link`, **not** `tool0`. The KDL kinematics plugin is also
 configured with `tip_link: gripper_tcp_link`.
 
+**The 0.173 m offset is the geometric midpoint** of the finger volume
+(0.120 m gripper_base → finger joint + 0.053 m ½ finger length). It must
+match in two places:
+
+- `urdf/gripper.urdf.xacro`: `gripper_tcp_joint` origin Z (URDF / RViz / MoveIt).
+- `src/pick_place_manager_node.py`: the `TCP_Z_OFFSET` constant feeding
+  `_build_tool0_to_tcp` (Python LM IK that drives motion).
+
+If you re-calibrate the gripper, change both.
+
 ### Orientation quaternions (in `base_link` frame)
 
 The robot is mounted such that the pick-zone working direction is **−Y**
@@ -303,21 +321,23 @@ TCP orientation quaternions reflect this.
 
 | Name | Value `(x,y,z,w)` | TCP Z-axis | Use |
 |---|---|---|---|
-| `FORWARD_QUAT` | `(0.7071, 0.0, 0.0, 0.7071)` | `[0,−1,0]` −Y | Grasp, approach, carry, place |
-| `DOWN_QUAT`    | `(1.0, 0.0, 0.0, 0.0)` | `[0,0,−1]` | Wait poses (camera pointed down) |
+| `FORWARD_QUAT` | `(0.5, 0.5, 0.5, 0.5)` | `[0,−1,0]` −Y | Every pose (wait, identify, grasp, approach, carry, place). |
 
-For `FORWARD_QUAT`: TCP-Z points along −Y (approach direction). For
-`DOWN_QUAT`: TCP-Z points along −Z (down).
+`FORWARD_QUAT` is the single orientation used for every IK solve. The identify
+pose adds a +90° rotation of `wrist_3_joint` (about the wrist_3_link Z-axis) on
+top of the IK solution — the camera frames the pick zone from the side without
+a separate goal quaternion.
 
 ### Named joint configurations
 
-The two wait-pose joint vectors (`wait_forward_joints`, `wait_down_joints`)
-and the front-camera identification pose (`identify_joints`) are **computed at
-node startup** by running `ik_for_tcp` against `WAIT_TCP` / `IDENTIFY_TCP` with
-the matching orientation quaternion. The hard-coded `_WAIT_FORWARD_SEED` and
-`_WAIT_DOWN_SEED` dictionaries in `pick_place_manager_node.py` are only IK
-seeds — they pick the desired branch (elbow direction, wrist_3 sign) but the
-final joint values come from LM optimisation against the actual chain.
+The wait-pose joint vector (`wait_forward_joints`) and the front-camera
+identification pose (`identify_joints`) are **computed at node startup** by
+running `ik_for_tcp` against `WAIT_TCP` / `IDENTIFY_TCP` with `FORWARD_QUAT`.
+`identify_joints` then has `IDENTIFY_WRIST3_OFFSET = +π/2` added to
+`wrist_3_joint`. The hard-coded `_WAIT_FORWARD_SEED` dictionary in
+`pick_place_manager_node.py` is only an IK seed — it picks the desired branch
+(elbow direction, wrist_3 sign) but the final joint values come from LM
+optimisation against the actual chain.
 
 This means `WAIT_TCP` (or `IDENTIFY_TCP`) can be edited without manually
 re-tuning every joint angle. If a value becomes unreachable from its seed the
@@ -326,8 +346,6 @@ node logs an error and falls back to the seed itself.
 **Seeds (radians)** — see `pick_place_manager_node.py` for current values:
 
 - `_WAIT_FORWARD_SEED` — wait pose facing the pickup zone.
-- `_WAIT_DOWN_SEED` — wait pose with camera pointed down over the pickup
-  zone.
 - `_PLACE_SEED` — **elbow-folded** branch over the place zone. Used to
   seed the q_high IK (and therefore q_place via chain). This branch keeps
   the upper arm clear of the table when reaching down to
@@ -344,7 +362,7 @@ waypoint by the nearest multiple of 2π so it's continuous with the robot's
 actual reported position. This avoids `PATH_TOLERANCE_VIOLATED` aborts.
 
 **Pre-positioning the robot before launch:** the FSM's first move is
-`MOVE_TO_WAIT`, a joint-space goal to `WAIT_DOWN_JOINTS`. If the robot is
+`MOVE_TO_WAIT`, a joint-space goal to `WAIT_FORWARD_JOINTS`. If the robot is
 in a wildly different IK branch from the planner's expectation OMPL may
 fail to plan or the resulting motion can be unsafe. Use rqt's joint
 trajectory controller GUI for live debugging:
@@ -361,7 +379,7 @@ desired configuration (sliders → `scaled_joint_trajectory_controller`).
 | Parameter | Value | Meaning |
 |---|---|---|
 | `WAIT_TCP` | (−0.30, −0.20, 0.26) | TCP position of both wait configurations |
-| `IDENTIFY_TCP` | (−0.30, −0.09, 0.10) | TCP pose from which the wrist camera frames the pickup zone from the front |
+| `IDENTIFY_TCP` | (0.09, −0.37, 0.15) | TCP pose from which the wrist camera frames the pickup zone. After IK the wrist_3 joint is rotated +π/2 about the wrist_3_link Z-axis. |
 | `APPROACH_OFFSET_Y` | −0.08 m | Stand-off in y from the can centre during pre-grasp (sign matches working direction) |
 | `LIFT_Z` | 0.12 m | Vertical height of the lift / retreat above the can |
 | `PLACE_ZONE_CENTER` | (0.30, −0.20) | Centre of the 2x2 place grid in XY |
@@ -380,7 +398,7 @@ desired configuration (sliders → `scaled_joint_trajectory_controller`).
   match the rviz visualizer markers exactly):
   - `table_top`: 1.5 × 0.8 × 0.05 m box at (0.0, 0.0, −0.025) — workspace
     surface flush with the arm mount
-  - `backboard`: 1.5 × 0.05 × 0.5 m box at (0.0, −0.325, 0.25) — vertical wall
+  - `backboard`: 1.5 × 0.05 × 0.5 m box at (−0.4, 0.0, 0.25) — vertical wall
     behind the robot
   - SRDF disables `base_link`/`base_link_inertia` ↔ `table_top` collision pairs
     so the flush mount does not register as a permanent collision.
@@ -407,7 +425,7 @@ simulation. It only runs when `fake_camera:=true` (or `auto` which resolves
 to true in home-sim mode).
 
 It publishes a `CanDetectionArray` to `/target_can_pose` directly in
-`base_link` with `source="front"` and full `class_name` info — the manager
+`base_link` with `source="front"` and `class_id` (0=beer, 1=coke, 2=lemon, 3=orange) — the manager
 no longer requires the prior top-down localisation pass, so a single front
 message is enough to drive the cycle.
 

@@ -29,7 +29,7 @@ External topic contract:
   /human_proximity        std_msgs/Float32   in [0, 1] (0=danger, 1=safe)
 
 Operator inputs (same in every mode):
-  /pick_command           std_msgs/String   e.g.  "coke,mahou"
+  /order                  std_msgs/String   e.g.  "type: coke, amount: 1"
   /clear_place_zone       std_msgs/Empty    resets the 2x2 place slot map
 """
 import os
@@ -120,6 +120,7 @@ def generate_launch_description():
     urdf_xacro = PathJoinSubstitution([FindPackageShare(pkg), 'urdf', 'ur3_camera_gripper.urdf.xacro'])
     robot_description_content = Command([
         FindExecutable(name='xacro'), ' ', urdf_xacro,
+        ' ur_type:=ur3e',
         ' sim_gazebo:=false',
         ' sim_ignition:=false',
         ' use_fake_hardware:=', use_fake_hardware,
@@ -240,14 +241,8 @@ def generate_launch_description():
         }],
         emulate_tty=True,
     )
-    # Simulated camera (publishes /target_can_pose directly). Only started
-    # when fake_camera is enabled (true, or 'auto' in home-sim mode).
-    depth_camera = Node(
-        package=pkg, executable='depth_camera_node.py', output='log',
-        condition=IfCondition(fake_camera_enabled),
-    )
     # Real RealSense + YOLO node. Publishes /front_detections (with
-    # class_name + position in camera_optical_link); pick_place_manager
+    # class_id + position in camera_optical_link); pick_place_manager
     # transforms and republishes them as /target_can_pose. Started only
     # when the fake camera is *not* in use.
     native_vision = Node(
@@ -269,7 +264,7 @@ def generate_launch_description():
             move_group,
             TimerAction(period=5.0, actions=[
                 planning_scene_manager, pick_place_manager,
-                depth_camera, native_vision, rviz_visualizer, rviz,
+                native_vision, rviz_visualizer, rviz,
             ]),
         ])
     )

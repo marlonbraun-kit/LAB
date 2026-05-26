@@ -35,36 +35,41 @@
   ── TCP ──────────────────────────────────────────────────────────────────
   Midpoint of the gripping zone: Z = 0.120 m (base) + 0.053 m (½ finger length)
                                     = 0.173 m from tool0
+  This is the single source of truth for the gripper TCP. The Python IK
+  chain in pick_place_manager_node.py mirrors it in TCP_Z_OFFSET — keep
+  the two in sync.
 -->
 <robot xmlns:xacro="http://wiki.ros.org/xacro">
 
   <xacro:macro name="parallel_gripper" params="prefix parent *origin">
 
     <!-- ════════════════════════════════════════════════════════════════
-         GRIPPER BASE  (adapter plate, 80 × 80 × 30 mm)
+         GRIPPER BASE  (adapter cylinder, Ø 70 × 100 mm)
+         Extends along gripper_base_link +Z (= TCP direction),
+         0 → 0.100 m. Sits just inside the UR3e wrist_3 flange (radius
+         0.045 m) and reaches up toward the fingers.
          ════════════════════════════════════════════════════════════════ -->
     <link name="${prefix}gripper_base_link">
       <inertial>
-        <origin xyz="0 0 0.015" rpy="0 0 0"/>
+        <origin xyz="0 0 0.050" rpy="0 0 0"/>
         <mass value="0.200"/>
-        <!-- Box 0.080 × 0.080 × 0.030 m, m = 0.200 kg
-             Ixx = (1/12)*0.2*(0.08²+0.03²) = 1.217e-4
-             Iyy = same (square cross-section)
-             Izz = (1/12)*0.2*(0.08²+0.08²) = 2.133e-4 -->
-        <inertia ixx="1.217e-4" ixy="0" ixz="0"
-                 iyy="1.217e-4"       iyz="0"
-                 izz="2.133e-4"/>
+        <!-- Cylinder r=0.035 m, h=0.100 m, m=0.200 kg
+             Ixx = Iyy = (1/12)*m*(3r²+h²) = 2.279e-4
+             Izz       = (1/2)*m*r²        = 1.225e-4 -->
+        <inertia ixx="2.279e-4" ixy="0" ixz="0"
+                 iyy="2.279e-4"       iyz="0"
+                 izz="1.225e-4"/>
       </inertial>
       <visual>
-        <origin xyz="0 0 0.015" rpy="0 0 0"/>
-        <geometry><box size="0.080 0.080 0.030"/></geometry>
+        <origin xyz="0 0 0.050" rpy="0 0 0"/>
+        <geometry><cylinder radius="0.035" length="0.100"/></geometry>
         <material name="${prefix}gripper_aluminium">
           <color rgba="0.75 0.75 0.75 1.0"/>
         </material>
       </visual>
       <collision>
-        <origin xyz="0 0 0.015" rpy="0 0 0"/>
-        <geometry><box size="0.080 0.080 0.030"/></geometry>
+        <origin xyz="0 0 0.050" rpy="0 0 0"/>
+        <geometry><cylinder radius="0.035" length="0.100"/></geometry>
       </collision>
     </link>
 
@@ -173,7 +178,14 @@
 
     <!-- ════════════════════════════════════════════════════════════════
          TCP  — Tool Centre Point
-         Z = 0.120 m (base height) + 0.053 m (½ finger length) = 0.173 m from tool0
+         Z = 0.120 m (gripper_base_link → finger joint origin)
+           + 0.053 m (½ finger length, 106 mm total)
+           = 0.173 m from tool0
+         This is the geometric midpoint of the finger volume and is where
+         a can sits when fully grasped. If you re-measure the real gripper
+         and need to retune, update this number AND the matching
+         TCP_Z_OFFSET constant in src/pick_place_manager_node.py
+         (they must stay in sync).
          ════════════════════════════════════════════════════════════════ -->
     <link name="${prefix}gripper_tcp_link"/>
     <joint name="${prefix}gripper_tcp_joint" type="fixed">

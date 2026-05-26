@@ -49,7 +49,7 @@ TABLE_SIZE = (1.5, 0.8, 0.05)
 TABLE_POS = (0.0, 0.0, -0.025)
 BACKBOARD_ID = 'backboard'
 BACKBOARD_SIZE = (0.05, 1.5, 0.5)
-BACKBOARD_POS = (-0.325, 0.0, 0.25)
+BACKBOARD_POS = (-0.4, 0.0, 0.25)
 
 ACTIVE_TARGET_ID = 'target_can'
 ATTACH_LINK = 'gripper_base_link'

@@ -15,13 +15,15 @@ import tf2_ros
 from ur3_interfaces.msg import CanDetectionArray
 
 
+# UR3e nominal DH (ur_description/config/ur3e/default_kinematics.yaml).
+# Must match pick_place_manager_node.py and the URDF ur_type.
 UR3_DH = [
-    (0.0,       0.1519,  math.pi / 2.0),
-    (-0.24365,  0.0,     0.0),
-    (-0.21325,  0.0,     0.0),
-    (0.0,       0.11235, math.pi / 2.0),
+    (0.0,       0.15185, math.pi / 2.0),
+    (-0.24355,  0.0,     0.0),
+    (-0.2132,   0.0,     0.0),
+    (0.0,       0.13105, math.pi / 2.0),
     (0.0,       0.08535, -math.pi / 2.0),
-    (0.0,       0.0819,  0.0),
+    (0.0,       0.0921,  0.0),
 ]
 
 PICK_ZONE = ( 0.2, -0.3, 0.0)
@@ -192,7 +194,7 @@ class RvizVisualizerNode(Node):
         m.ns = 'backboard'
         m.id = 11
         m.type = Marker.CUBE
-        m.pose.position.x = -0.325
+        m.pose.position.x = -0.4
         m.pose.position.y = 0.0
         m.pose.position.z = 0.25
         m.pose.orientation.w = 1.0

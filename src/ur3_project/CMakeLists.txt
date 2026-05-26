@@ -18,7 +18,6 @@ find_package(ur3_interfaces REQUIRED)
 # Python nodes (installed as executables)
 install(PROGRAMS
   src/pick_place_manager_node.py
-  src/depth_camera_node.py
   src/rviz_visualizer_node.py
   src/planning_scene_manager_node.py
   scripts/native_vision_node.py

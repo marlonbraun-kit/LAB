@@ -1,18 +1,24 @@
 #!/usr/bin/env python3
 """Pick-and-place state machine driven by MoveIt2.
 
-Cycle (one /pick_command can trigger many picks)
+Cycle (one /order can trigger many picks)
 -----------------------------------------------
 BOOT
-  -> MOVE_TO_WAIT          joint goal -> WAIT_DOWN_JOINTS  (camera looks down)
-  -> WAIT_FOR_COMMAND      hold until /pick_command (e.g. "coke,mahou")
+  -> MOVE_TO_WAIT          joint goal -> WAIT_FORWARD_JOINTS
+  -> WAIT_FOR_COMMAND      hold until /order (e.g. "coke,mahou")
   -> ORIENT_FORWARD        joint goal -> WAIT_FORWARD_JOINTS
-  -> MOVE_TO_IDENTIFY      joint goal -> IDENTIFY_JOINTS
+  -> MOVE_TO_IDENTIFY      joint goal -> IDENTIFY_JOINTS  (FORWARD_QUAT branch)
+  -> ROTATE_FOR_IDENTIFY   joint goal -> IDENTIFY_JOINTS_ROTATED
+                           (wrist_3 += +π/2 so the camera frames the cans)
   -> IDENTIFY_FROM_FRONT   wait for a /front_detections message from
                            native_vision_node — each detection carries both
-                           class_name and 3D position in camera_optical_link.
+                           class_id and 3D position in camera_optical_link.
                            Positions are transformed to base_link and the
                            z component is overridden with FIXED_CAN_Z.
+  -> ROTATE_BACK_FROM_IDENTIFY
+                           joint goal -> IDENTIFY_JOINTS (wrist_3 back to
+                           FORWARD_QUAT branch) so pregrasp IK seeds from
+                           the canonical wrist branch.
   -> NEXT_TARGET           pop next class from queue, look up matched position,
                            solve IK chain.  When queue empty -> ALL_DONE.
   -> PLAN_TO_PREGRASP
@@ -62,7 +68,6 @@ from moveit_msgs.action import ExecuteTrajectory, MoveGroup
 from moveit_msgs.srv import GetCartesianPath
 from moveit_msgs.msg import (
     Constraints,
-    DisplayTrajectory,
     JointConstraint,
     MotionPlanRequest,
     PlanningOptions,
@@ -79,7 +84,6 @@ from ur3_interfaces.msg import CanDetection, CanDetectionArray
 # Orientation quaternions (in planning frame = base_link)
 # ---------------------------------------------------------------------------
 FORWARD_QUAT = (0.5,       0.5,       0.5,       0.5)
-DOWN_QUAT    = (0.7071068, 0.7071068, 0.0,       0.0)
 
 # ---------------------------------------------------------------------------
 # IK seeds for wait poses
@@ -91,15 +95,6 @@ _WAIT_FORWARD_SEED = {
     'wrist_1_joint':       -0.1827,
     'wrist_2_joint':       -0.5583,
     'wrist_3_joint':        2.7052640,
-}
-
-_WAIT_DOWN_SEED = {
-    'shoulder_pan_joint':   4.9834890,
-    'shoulder_lift_joint': -0.7398,
-    'elbow_joint':         -0.4602,
-    'wrist_1_joint':       -0.3709,
-    'wrist_2_joint':       -1.5708,
-    'wrist_3_joint':       -1.7360360,
 }
 
 # Seed for the place pose. Same TCP region as the wait-down pose (camera
@@ -147,7 +142,12 @@ PLACE_SLOT_OFFSETS = [
 ]
 NUM_PLACE_SLOTS = len(PLACE_SLOT_OFFSETS)
 
-IDENTIFY_TCP = (0.09, -0.30, 0.10)
+IDENTIFY_TCP = (0.02, -0.3, 0.15)
+# Extra wrist_3 rotation (about the wrist_3_link Z-axis) applied to the IK
+# solution for the identify pose. The IK is solved with FORWARD_QUAT and then
+# wrist_3_joint += IDENTIFY_WRIST3_OFFSET so the camera frames the picking
+# zone from the side without needing a separate goal quaternion.
+IDENTIFY_WRIST3_OFFSET = math.pi / 2.0
 
 # Fixed can height (z) in base_link frame, applied to every detection from the
 # front camera. The camera's depth estimate is noisy at close range and the
@@ -158,6 +158,11 @@ FIXED_CAN_Z = 0.06
 # Source frame published by native_vision_node — detections arrive in the
 # camera optical frame and are transformed to base_link before use.
 CAMERA_OPTICAL_FRAME = 'camera_optical_link'
+
+# YOLO class index → can class name. Detections on /front_detections carry
+# class_id (int); the manager maps it to a name for the command queue.
+CAN_CLASS_NAMES = {0: 'beer', 1: 'coke', 2: 'lemon', 3: 'orange'}
+CAN_CLASS_IDS = {v: k for k, v in CAN_CLASS_NAMES.items()}
 
 # ---------------------------------------------------------------------------
 # Gripper commands
@@ -188,10 +193,15 @@ MOTION_WATCHDOG_S = 30.0
 
 
 # ---------------------------------------------------------------------------
-# UR3 inverse kinematics (numerical, seeded)
+# UR3e inverse kinematics (numerical, seeded)
 # ---------------------------------------------------------------------------
-UR3_DH_A     = [0.0,        -0.24365, -0.21325, 0.0,        0.0,         0.0]
-UR3_DH_D     = [0.1519,      0.0,      0.0,     0.11235,    0.08535,     0.0819]
+# Nominal DH from ur_description/config/ur3e/default_kinematics.yaml.
+# MUST match the ur_type the URDF is loaded with (see launch file +
+# ur3_camera_gripper.urdf.xacro). UR3 vs UR3e differ in d4 (~19 mm) and
+# d6 (~10 mm); a mismatch shows up as a few-mm position error that
+# flips sign with wrist_2.
+UR3_DH_A     = [0.0,        -0.24355, -0.2132,  0.0,         0.0,         0.0]
+UR3_DH_D     = [0.15185,     0.0,      0.0,     0.13105,     0.08535,     0.0921]
 UR3_DH_ALPHA = [math.pi/2.0, 0.0,      0.0,     math.pi/2.0, -math.pi/2.0, 0.0]
 
 _RZ_180 = np.array([
@@ -202,13 +212,20 @@ _RZ_180 = np.array([
 ])
 
 
+# tool0 → gripper_tcp_link offset along the gripper extension axis.
+# MUST MATCH the gripper_tcp_joint origin Z in urdf/gripper.urdf.xacro.
+# This is the only place the value lives on the Python side — if you change
+# the URDF, change this too (or vice versa).
+TCP_Z_OFFSET = 0.173
+
+
 def _build_tool0_to_tcp():
     angle = -math.pi + math.radians(25)
     c, s = math.cos(angle), math.sin(angle)
     return np.array([
         [c, -s, 0.0, 0.0],
         [s,  c, 0.0, 0.0],
-        [0.0, 0.0, 1.0, 0.173],
+        [0.0, 0.0, 1.0, TCP_Z_OFFSET],
         [0.0, 0.0, 0.0, 1.0],
     ])
 
@@ -406,9 +423,6 @@ class PickPlaceManagerNode(Node):
         self.gripper_pub = self.create_publisher(
             Float64MultiArray, '/gripper_controller/commands', 10
         )
-        self.display_path_pub = self.create_publisher(
-            DisplayTrajectory, '/display_planned_path', 1
-        )
         # Tells the planning_scene_manager which detected can is the active
         # pick (so it can be suppressed during approach and attached on grasp).
         self.current_target_pub = self.create_publisher(
@@ -436,7 +450,7 @@ class PickPlaceManagerNode(Node):
             callback_group=self._sub_group,
         )
         self.create_subscription(
-            String, '/pick_command', self._on_command, 10,
+            String, '/order', self._on_command, 10,
             callback_group=self._sub_group,
         )
         self.create_subscription(
@@ -477,6 +491,15 @@ class PickPlaceManagerNode(Node):
         self.command_queue = []          # list[str] of remaining can classes to pick
         self.identified = []             # list[{'class': str, 'pos': (x,y,z)}]
 
+        # /order debounce: a single logical order can arrive as multiple
+        # back-to-back messages, one per type, e.g.
+        #   "type: coke, amount: 1"
+        #   "type: beer, amount: 1"
+        # Collect them all and only start the cycle after no new order has
+        # arrived for ORDER_DEBOUNCE_S seconds.
+        self.ORDER_DEBOUNCE_S = 0.7
+        self._order_debounce_timer = None
+
         # Per-pick state
         self.active_target_pos = None    # (x, y, z)
         self.active_target_class = None
@@ -508,17 +531,23 @@ class PickPlaceManagerNode(Node):
             )
             self.wait_forward_joints = _WAIT_FORWARD_SEED
 
-        self.wait_down_joints = ik_for_tcp(*WAIT_TCP, DOWN_QUAT, _WAIT_DOWN_SEED)
-        if self.wait_down_joints is None:
-            self.get_logger().error(
-                f'WAIT_TCP={WAIT_TCP} unreachable with DOWN_QUAT — using seed as fallback.'
-            )
-            self.wait_down_joints = _WAIT_DOWN_SEED
-
         self.identify_joints = ik_for_tcp(*IDENTIFY_TCP, FORWARD_QUAT, self.wait_forward_joints)
         if self.identify_joints is None:
             self.get_logger().error(
                 f'IDENTIFY_TCP={IDENTIFY_TCP} unreachable — IDENTIFY step will be skipped.'
+            )
+            self.identify_joints_rotated = None
+        else:
+            # Same TCP / branch as identify_joints, but with wrist_3 rotated
+            # +90° about wrist_3_link Z so the camera frames the pick zone
+            # from the side. Applied as a discrete FSM step *after* arriving
+            # at the identify pose, then unwound *before* planning the
+            # pregrasp so that pregrasp IK seeds from the canonical
+            # FORWARD_QUAT branch.
+            self.identify_joints_rotated = dict(self.identify_joints)
+            self.identify_joints_rotated['wrist_3_joint'] = (
+                self.identify_joints_rotated['wrist_3_joint']
+                + IDENTIFY_WRIST3_OFFSET
             )
 
         # Per-pick chained IK results.
@@ -571,8 +600,15 @@ class PickPlaceManagerNode(Node):
         FIXED_CAN_Z, and republishes the result on /target_can_pose so the
         rest of the pipeline (this node's IDENTIFY handler, the planning
         scene, the RViz markers) sees a single canonical detection stream.
+
+        Only republish while the robot is stationary in IDENTIFY_FROM_FRONT.
+        Otherwise the wrist_3 rotation (and any other motion) would feed
+        moving camera readings into the planning scene / RViz markers, making
+        the can positions drift before they are locked in.
         """
         if not msg.detections:
+            return
+        if self.state != 'IDENTIFY_FROM_FRONT' or self._motion_mode is not None:
             return
         src_frame = msg.header.frame_id or CAMERA_OPTICAL_FRAME
         out = CanDetectionArray()
@@ -597,7 +633,7 @@ class PickPlaceManagerNode(Node):
             new_det = CanDetection()
             new_det.header = out.header
             new_det.id = det.id
-            new_det.class_name = det.class_name
+            new_det.class_id = det.class_id
             new_det.confidence = det.confidence
             new_det.position.x = pt_out.point.x
             new_det.position.y = pt_out.point.y
@@ -611,9 +647,11 @@ class PickPlaceManagerNode(Node):
         """Receive a /target_can_pose message.
 
         Only acts in IDENTIFY_FROM_FRONT: every detection carries a
-        class_name and a (x, y, z) position already in base_link with the
+        class_id and a (x, y, z) position already in base_link with the
         fixed z applied (see _on_front_detections). We build the
-        {class -> position} list directly and transition to NEXT_TARGET.
+        {class -> position} list directly and transition to
+        ROTATE_BACK_FROM_IDENTIFY so the wrist returns to the canonical
+        FORWARD_QUAT branch before pregrasp IK runs.
         """
         if not msg.detections:
             return
@@ -622,7 +660,7 @@ class PickPlaceManagerNode(Node):
 
         matched = []
         for det in msg.detections:
-            cls = (det.class_name or '').strip().lower()
+            cls = CAN_CLASS_NAMES.get(int(det.class_id))
             if not cls:
                 continue
             matched.append({
@@ -632,33 +670,80 @@ class PickPlaceManagerNode(Node):
                         float(det.position.z)),
             })
         if not matched:
-            self.get_logger().info('  IDENTIFY: no detections with class_name set, ignoring')
+            self.get_logger().info('  IDENTIFY: no detections with known class_id, ignoring')
             return
         self.identified = matched
         classes = sorted({m['class'] for m in matched})
         self.get_logger().info(
             f'Identified {len(matched)} can(s): classes={classes}'
         )
-        self._enter('NEXT_TARGET')
+        self._enter('ROTATE_BACK_FROM_IDENTIFY')
 
     def _on_command(self, msg):
-        """A new pick command queues classes to grasp in order."""
+        """Handle a /order message.
+
+        Expected payload: "type: <class>, amount: <N>"
+
+        A single logical order can arrive as multiple back-to-back messages
+        (one per type) — they are all queued together. The cycle starts only
+        after no new /order has arrived for ORDER_DEBOUNCE_S seconds.
+        """
         raw = (msg.data or '').strip()
         if not raw:
-            self.get_logger().warn('Empty /pick_command ignored.')
+            self.get_logger().warn('Empty /order ignored.')
             return
-        items = [s.strip().lower() for s in raw.replace(';', ',').split(',') if s.strip()]
-        if not items:
+        fields = {}
+        for part in raw.split(','):
+            if ':' not in part:
+                continue
+            k, v = part.split(':', 1)
+            fields[k.strip().lower()] = v.strip()
+        cls = fields.get('type', '').lower()
+        if not cls or cls not in CAN_CLASS_IDS:
+            self.get_logger().warn(
+                f'/order: unknown or missing type {fields!r} (expected one of '
+                f'{sorted(CAN_CLASS_IDS)}).'
+            )
+            return
+        try:
+            amount = int(fields.get('amount', '1'))
+        except ValueError:
+            self.get_logger().warn(f'/order: bad amount in {raw!r}.')
+            return
+        if amount <= 0:
+            self.get_logger().warn(f'/order: non-positive amount in {raw!r}.')
             return
         if self.state != 'WAIT_FOR_COMMAND':
             self.get_logger().warn(
-                f'/pick_command received in state {self.state}; ignored '
+                f'/order received in state {self.state}; ignored '
                 '(robot must be at WAIT_FOR_COMMAND).'
             )
             return
-        self.command_queue = items
+        self.command_queue.extend([cls] * amount)
+        self.get_logger().info(
+            f'Order line accepted: type={cls}, amount={amount}; '
+            f'queue now {self.command_queue}'
+        )
+        # (re)start the debounce — every new /order pushes the start back so
+        # all parts of the same logical order get collected first.
+        if self._order_debounce_timer is not None:
+            self._order_debounce_timer.cancel()
+        self._order_debounce_timer = self.create_timer(
+            self.ORDER_DEBOUNCE_S, self._start_cycle_after_debounce
+        )
+
+    def _start_cycle_after_debounce(self):
+        if self._order_debounce_timer is not None:
+            self._order_debounce_timer.cancel()
+            self._order_debounce_timer = None
+        if self.state != 'WAIT_FOR_COMMAND':
+            return
+        if not self.command_queue:
+            return
         self.identified = []
-        self.get_logger().info(f'Command accepted: {items}')
+        self.get_logger().info(
+            f'Order complete — starting cycle. Full queue: {self.command_queue}'
+        )
         self._enter('ORIENT_FORWARD')
 
     def _on_clear_place_zone(self, _msg):
@@ -853,7 +938,12 @@ class PickPlaceManagerNode(Node):
             vel, acc,
         )
         goal.planning_options = PlanningOptions()
-        goal.planning_options.plan_only = self._debug_step
+        # Always plan+execute in a single call. The previous debug-mode
+        # plan_only path published a ghost trajectory that did not match the
+        # actual executed motion (KDL branch flips during execution), so the
+        # preview was misleading. The debug step gate still pauses between
+        # motions — it just no longer shows the ghost.
+        goal.planning_options.plan_only = False
         goal.planning_options.look_around = False
         goal.planning_options.replan = False
         goal.planning_options.planning_scene_diff.is_diff = True
@@ -930,10 +1020,6 @@ class PickPlaceManagerNode(Node):
             f'{len(res.solution.joint_trajectory.points)} pts).'
         )
         self._planned_traj = res.solution
-        if self._debug_step:
-            self._publish_display_path(res.solution)
-            self._debug_phase = 'plan_done'
-            return
         if not self._dispatch_cached_execute():
             return
 
@@ -964,52 +1050,6 @@ class PickPlaceManagerNode(Node):
             return True, False
 
         if self._motion_mode == 'cartesian':
-            if self._debug_step and self._debug_phase == 'plan_done':
-                if not self._step_gate_open(
-                    'Trajectory planned (cartesian). Press Enter to execute.'
-                ):
-                    return False, False
-                self._debug_phase = 'executing'
-                if not self._dispatch_cached_execute():
-                    return True, False
-                return False, False
-            if self._exec_result_future is None or not self._exec_result_future.done():
-                return False, False
-            result = self._exec_result_future.result()
-            if result is None:
-                return True, False
-            err = result.result.error_code.val
-            if err != 1:
-                self.get_logger().error(
-                    f'ExecuteTrajectory error_code={err} in state {self.state}.'
-                )
-            return True, err == 1
-
-        if self._debug_step:
-            if self._debug_phase == 'idle':
-                if self._result_future is None or not self._result_future.done():
-                    return False, False
-                result = self._result_future.result()
-                if result is None:
-                    return True, False
-                err = result.result.error_code.val
-                if err != 1:
-                    self.get_logger().error(
-                        f'MoveGroup planning error_code={err} in state {self.state}.'
-                    )
-                    return True, False
-                self._planned_traj = result.result.planned_trajectory
-                self._debug_phase = 'plan_done'
-                return False, False
-            if self._debug_phase == 'plan_done':
-                if not self._step_gate_open(
-                    'Trajectory planned (joint). Press Enter to execute.'
-                ):
-                    return False, False
-                self._debug_phase = 'executing'
-                if not self._dispatch_cached_execute():
-                    return True, False
-                return False, False
             if self._exec_result_future is None or not self._exec_result_future.done():
                 return False, False
             result = self._exec_result_future.result()
@@ -1033,12 +1073,6 @@ class PickPlaceManagerNode(Node):
                 f'MoveGroup error_code={err} in state {self.state}.'
             )
         return True, err == 1
-
-    def _publish_display_path(self, robot_trajectory):
-        msg = DisplayTrajectory()
-        msg.model_id = 'ur3'
-        msg.trajectory.append(robot_trajectory)
-        self.display_path_pub.publish(msg)
 
     def _normalize_trajectory_to_robot(self, traj):
         """Shift each joint's waypoints by multiples of 2π so the first
@@ -1149,16 +1183,34 @@ class PickPlaceManagerNode(Node):
     # ------------------------------------------------------------------
 
     def move_to_waiting_pose(self):
-        self._handle_joint_move(self.wait_down_joints, next_on_success='WAIT_FOR_COMMAND')
+        self._handle_joint_move(self.wait_forward_joints, next_on_success='WAIT_FOR_COMMAND')
 
     def set_forward_orientation(self):
         self._handle_joint_move(self.wait_forward_joints, next_on_success='MOVE_TO_IDENTIFY')
 
     def move_to_identify_pose(self):
+        # Step 1 of identify: arrive at IDENTIFY_TCP in the FORWARD_QUAT branch
+        # (canonical wrist). Wrist rotation happens in the next state so the
+        # camera-side framing only affects the identify capture itself.
         target = self.identify_joints if self.identify_joints is not None else self.wait_forward_joints
-        # Once stationary, IDENTIFY_FROM_FRONT just waits for a source="front"
-        # detection on /target_can_pose; _on_detections triggers the transition.
-        self._handle_joint_move(target, next_on_success='IDENTIFY_FROM_FRONT')
+        self._handle_joint_move(target, next_on_success='ROTATE_FOR_IDENTIFY')
+
+    def rotate_for_identify(self):
+        # Step 2 of identify: rotate wrist_3 by +90° in place. After this the
+        # FSM holds in IDENTIFY_FROM_FRONT until a /front_detections message
+        # is consumed by _on_detections.
+        if self.identify_joints_rotated is None:
+            self._enter('IDENTIFY_FROM_FRONT')
+            return
+        self._handle_joint_move(
+            self.identify_joints_rotated, next_on_success='IDENTIFY_FROM_FRONT'
+        )
+
+    def rotate_back_from_identify(self):
+        # Step 4 of identify: unwind the +90° wrist_3 rotation so subsequent
+        # pregrasp IK seeds from the canonical FORWARD_QUAT branch.
+        target = self.identify_joints if self.identify_joints is not None else self.wait_forward_joints
+        self._handle_joint_move(target, next_on_success='NEXT_TARGET')
 
     def plan_to_pregrasp(self):
         self._handle_joint_move(self.q_pregrasp, next_on_success='CARTESIAN_APPROACH')
@@ -1186,7 +1238,7 @@ class PickPlaceManagerNode(Node):
         # Joint-space move to q_retreat (the high pre-place IK solution).
         # Same reasoning as joint_approach: a Cartesian planner here flips
         # KDL branches mid-path and lands the robot in a twisted
-        # configuration that can't plan back to WAIT_DOWN afterwards.
+        # configuration that can't plan back to the wait pose afterwards.
         if self.q_retreat is None:
             self.get_logger().warn('No q_retreat available — aborting.')
             self._abort_cycle()
@@ -1195,7 +1247,7 @@ class PickPlaceManagerNode(Node):
         self._handle_joint_move(self.q_retreat, next_on_success='AFTER_RETREAT')
 
     def orient_down_at_wait(self):
-        self._handle_joint_move(self.wait_down_joints, next_on_success='WAIT_FOR_COMMAND')
+        self._handle_joint_move(self.wait_forward_joints, next_on_success='WAIT_FOR_COMMAND')
 
     # ------------------------------------------------------------------
     # State machine tick
@@ -1235,8 +1287,16 @@ class PickPlaceManagerNode(Node):
             self.move_to_identify_pose()
             return
 
+        if s == 'ROTATE_FOR_IDENTIFY':
+            self.rotate_for_identify()
+            return
+
         if s == 'IDENTIFY_FROM_FRONT':
             # Held here until _on_detections consumes a source="front" message.
+            return
+
+        if s == 'ROTATE_BACK_FROM_IDENTIFY':
+            self.rotate_back_from_identify()
             return
 
         if s == 'NEXT_TARGET':

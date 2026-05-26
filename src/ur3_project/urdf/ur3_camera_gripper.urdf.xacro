@@ -10,8 +10,10 @@
   <xacro:include filename="$(find ur3_project)/urdf/camera.urdf.xacro"/>
 
   <!-- ── UR robot parameters ──────────────────────────────────────────── -->
-  <!-- possible 'ur_type' values: ur3, ur5, ur10, ur3e, ur5e, … -->
-  <xacro:arg name="ur_type"                  default="ur3"/>
+  <!-- possible 'ur_type' values: ur3, ur5, ur10, ur3e, ur5e, …
+       This project targets the UR3e: link lengths d4/d6 differ from the
+       UR3 by 1–2 cm and the robot calibration YAML is UR3e-extracted. -->
+  <xacro:arg name="ur_type"                  default="ur3e"/>
   <xacro:arg name="tf_prefix"                default=""/>
   <xacro:arg name="joint_limit_params"       default="$(find ur_description)/config/$(arg ur_type)/joint_limits.yaml"/>
   <xacro:arg name="kinematics_params"        default="$(find ur_description)/config/$(arg ur_type)/default_kinematics.yaml"/>
