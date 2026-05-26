@@ -59,8 +59,8 @@ from rclpy.duration import Duration
 from rclpy.executors import MultiThreadedExecutor
 from rclpy.node import Node
 
-from std_msgs.msg import String, Float64MultiArray, Float32, Empty, Bool
-from ur_msgs.srv import SetIO
+from std_msgs.msg import String, Float64MultiArray, Float32, Float64, Empty, Bool
+from ur_msgs.srv import SetIO, SetSpeedSliderFraction
 from geometry_msgs.msg import Pose, PoseStamped, Vector3, PointStamped
 from sensor_msgs.msg import JointState
 
@@ -177,8 +177,8 @@ JOINT_TOL          = 0.01
 PLANNING_TIME_S    = 10.0
 PLANNING_ATTEMPTS  = 20
 
-VEL_SCALING_NORMAL = 0.3
-ACC_SCALING_NORMAL = 0.3
+VEL_SCALING_NORMAL = 0.02
+ACC_SCALING_NORMAL = 0.02
 SLOWDOWN_FACTOR    = 0.5  # speed multiplier when a hand is close
 HUMAN_PROXIMITY_THRESHOLD = 0.5  # /human_proximity below this -> slow
 
@@ -418,6 +418,22 @@ class PickPlaceManagerNode(Node):
             SetIO, '/io_and_status_controller/set_io'
         )
         self._gripper_io_fun = 1
+        # Pendant speed-slider integration. The operator dials the pendant
+        # to whatever speed they want; we latch that value on startup and
+        # then drive the slider between [latched] (safe) and
+        # [latched * SLOWDOWN_FACTOR] (hand detected) via the speed-slider
+        # service. Plan-time vel/acc scaling stays under code control via
+        # VEL_SCALING_NORMAL / ACC_SCALING_NORMAL — orthogonal knob.
+        self._pendant_scaling = None  # None = not yet received
+        self._last_slider_fraction = None
+        self._speed_scaling_sub = self.create_subscription(
+            Float64, '/speed_scaling_state_broadcaster/speed_scaling',
+            self._on_pendant_scaling, 10,
+        )
+        self.speed_slider_client = self.create_client(
+            SetSpeedSliderFraction,
+            '/io_and_status_controller/set_speed_slider',
+        )
         # RViz-only visualisation: publish the same open/close intent to the
         # mock-backed gripper position controller so the URDF fingers move.
         self.gripper_pub = self.create_publisher(
@@ -755,6 +771,67 @@ class PickPlaceManagerNode(Node):
             self._human_proximity = float(msg.data)
         except (TypeError, ValueError):
             return
+        # Drive the pendant slider live so in-flight motions slow the moment
+        # a hand is detected. The "fast" target is the value we latched on
+        # startup (operator's chosen speed); "slow" is that × SLOWDOWN_FACTOR.
+        self.get_logger().debug(
+            f'Proximity update: {self._human_proximity:.3f}, '
+            f'pendant_scaling={self._pendant_scaling}, last_slider={self._last_slider_fraction}'
+        )
+        if self._pendant_scaling is None:
+            self.get_logger().info('Pendant scaling not latched yet; ignoring proximity.')
+            return  # haven't heard the pendant yet — wait for the latch
+        if self._human_proximity < HUMAN_PROXIMITY_THRESHOLD:
+            target = self._pendant_scaling * SLOWDOWN_FACTOR
+        else:
+            target = self._pendant_scaling
+        if target != self._last_slider_fraction:
+            self.get_logger().info(
+                f'Setting speed slider target {target:.3f} (proximity={self._human_proximity:.3f})'
+            )
+            self._set_speed_slider(target)
+
+    def _on_pendant_scaling(self, msg):
+        # Latch the pendant slider value the *first* time we hear it. This is
+        # the operator's chosen speed and becomes our "safe" slider target.
+        # Subsequent updates are ignored because they'll mostly be feedback
+        # from our own _set_speed_slider calls.
+        if self._pendant_scaling is not None:
+            return
+        try:
+            val = float(msg.data)
+        except (TypeError, ValueError):
+            return
+        val = max(0.01, min(1.0, val))
+        self._pendant_scaling = val
+        self._last_slider_fraction = val  # already there — no need to set it
+        self.get_logger().info(
+            f'Pendant speed slider latched at {val:.2f}. '
+            f'Slow mode will drive it to {val * SLOWDOWN_FACTOR:.3f}.'
+        )
+
+    def _set_speed_slider(self, fraction):
+        fraction = max(0.01, min(1.0, float(fraction)))
+        # If the service isn't ready yet, give it a short wait so we can
+        # still drive the real robot's slider when it appears. If it remains
+        # unavailable, bail out (mock-hardware mode).
+        if not self.speed_slider_client.service_is_ready():
+            self.get_logger().warn('Speed-slider service not ready; waiting up to 0.5s')
+            try:
+                ready = self.speed_slider_client.wait_for_service(timeout_sec=0.5)
+            except Exception:
+                ready = False
+            if not ready:
+                self.get_logger().warn('Speed-slider service unavailable; cannot set slider.')
+                return
+        req = SetSpeedSliderFraction.Request()
+        req.speed_slider_fraction = fraction
+        self.speed_slider_client.call_async(req)
+        self._last_slider_fraction = fraction
+        self.get_logger().info(
+            f'UR speed slider -> {fraction:.2f} '
+            f'(proximity={self._human_proximity:.2f})'
+        )
 
     def _on_joint_states(self, msg: JointState):
         self._latest_joint_state = msg
@@ -784,9 +861,10 @@ class PickPlaceManagerNode(Node):
     # ------------------------------------------------------------------
 
     def _scaling_pair(self):
-        if self._human_proximity < HUMAN_PROXIMITY_THRESHOLD:
-            return (VEL_SCALING_NORMAL * SLOWDOWN_FACTOR,
-                    ACC_SCALING_NORMAL * SLOWDOWN_FACTOR)
+        # Plan-time scaling is user-controlled via VEL_SCALING_NORMAL /
+        # ACC_SCALING_NORMAL. The pendant slider (driven dynamically by
+        # _on_proximity) handles runtime slowdown for hand detection — keeping
+        # these two knobs orthogonal.
         return (VEL_SCALING_NORMAL, ACC_SCALING_NORMAL)
 
     # ------------------------------------------------------------------
