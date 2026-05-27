@@ -6,8 +6,8 @@
     <chain base_link="base_link" tip_link="gripper_tcp_link"/>
   </group>
 
-  <!-- wait_forward: gripper_tcp_link at WAIT_TCP (0.20, -0.30, 0.26) in base_link
-       (= world (0.30, 0.20, 1.06)), facing +X in base_link / +Y in world
+  <!-- wait_forward: gripper_tcp_link at WAIT_TCP (0.20, -0.30, 0.26) in base_link,
+       facing +X in base_link / +Y in world
        (FORWARD_QUAT = (0.5, 0.5, 0.5, 0.5)). wrist_3 = +pi branch, shared
        by all pick-cycle IK solutions so no 2*pi joint jump occurs. Joint values
        below match config/initial_positions.yaml so spawn lands here. -->

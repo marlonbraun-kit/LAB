@@ -170,6 +170,14 @@ ros2 topic pub --once /target_can_pose ur3_interfaces/msg/CanDetectionArray \
 # debounces them (~0.7 s) and starts the cycle once all lines are in.
 ros2 topic pub --once /order std_msgs/String '{data: "type: coke, amount: 1"}'
 ros2 topic pub --once /order std_msgs/String '{data: "type: beer, amount: 1"}'
+ros2 topic pub --once /order std_msgs/String '{data: "type: lemon, amount: 1"}'
+ros2 topic pub --once /order std_msgs/String '{data: "type: orange, amount: 1"}'
+
+#all cans at once
+for t in coke beer lemon orange; do
+  ros2 topic pub --once /order std_msgs/String "{data: 'type: $t, amount: 1'}" &
+done
+wait
 
 # simulate human approach
 ros2 topic pub --once /human_proximity std_msgs/Float32 '{data: 0.0}'
@@ -378,11 +386,11 @@ desired configuration (sliders → `scaled_joint_trajectory_controller`).
 
 | Parameter | Value | Meaning |
 |---|---|---|
-| `WAIT_TCP` | (−0.30, −0.20, 0.26) | TCP position of both wait configurations |
+| `WAIT_TCP` | (0.20, −0.30, 0.26) | TCP position of the wait pose |
 | `IDENTIFY_TCP` | (0.09, −0.37, 0.15) | TCP pose from which the wrist camera frames the pickup zone. After IK the wrist_3 joint is rotated +π/2 about the wrist_3_link Z-axis. |
 | `APPROACH_OFFSET_Y` | −0.08 m | Stand-off in y from the can centre during pre-grasp (sign matches working direction) |
 | `LIFT_Z` | 0.12 m | Vertical height of the lift / retreat above the can |
-| `PLACE_ZONE_CENTER` | (0.30, −0.20) | Centre of the 2x2 place grid in XY |
+| `PLACE_ZONE_CENTER` | (0.20, 0.35) | Centre of the 2x2 place grid in XY |
 | `PLACE_GRID_SPACING` | 0.12 m | Centre-to-centre spacing between adjacent slots |
 | `PLACE_TCP_Z` | 0.10 m | TCP height when placing (can bottom ≈ 2 cm above the table) |
 | `HUMAN_PROXIMITY_THRESHOLD` | 0.5 | Below this, next motion uses 0.5 × normal speed |

@@ -59,7 +59,7 @@ from rclpy.duration import Duration
 from rclpy.executors import MultiThreadedExecutor
 from rclpy.node import Node
 
-from std_msgs.msg import String, Float64MultiArray, Float32, Float64, Empty, Bool
+from std_msgs.msg import String, Float64MultiArray, Float32, Empty, Bool
 from ur_msgs.srv import SetIO, SetSpeedSliderFraction
 from geometry_msgs.msg import Pose, PoseStamped, Vector3, PointStamped
 from sensor_msgs.msg import JointState
@@ -131,7 +131,7 @@ GRASP_Z_OFFSET = 0.05
 
 # Place zone is a 2x2 grid centred on PLACE_ZONE_CENTER in XY.
 # Slots are filled in this order (back-row first).  "back" = +Y.
-PLACE_ZONE_CENTER = (0.20, 0.30)
+PLACE_ZONE_CENTER = (0.20, 0.35)
 PLACE_GRID_SPACING = 0.12
 PLACE_TCP_Z = 0.1
 PLACE_SLOT_OFFSETS = [
@@ -177,9 +177,10 @@ JOINT_TOL          = 0.01
 PLANNING_TIME_S    = 10.0
 PLANNING_ATTEMPTS  = 20
 
-VEL_SCALING_NORMAL = 0.02
-ACC_SCALING_NORMAL = 0.02
-SLOWDOWN_FACTOR    = 0.5  # speed multiplier when a hand is close
+VEL_SCALING_NORMAL = 0.5
+ACC_SCALING_NORMAL = 0.7
+SLOWDOWN_FACTOR    = 0.2  # speed percentage when hand is close
+FAST_FACTOR        = 0.4  # speed percentage when hand is not close
 HUMAN_PROXIMITY_THRESHOLD = 0.5  # /human_proximity below this -> slow
 
 CARTESIAN_MAX_STEP       = 0.005
@@ -189,7 +190,7 @@ CARTESIAN_MIN_FRACTION   = 1.0
 # If no motion progress is observed for this many seconds, abort the motion
 # and recover to WAIT_FOR_COMMAND. Catches stuck action futures (e.g. when
 # move_group's first goal-response handshake is dropped by the DDS layer).
-MOTION_WATCHDOG_S = 30.0
+MOTION_WATCHDOG_S = 45.0
 
 
 # ---------------------------------------------------------------------------
@@ -418,22 +419,14 @@ class PickPlaceManagerNode(Node):
             SetIO, '/io_and_status_controller/set_io'
         )
         self._gripper_io_fun = 1
-        # Pendant speed-slider integration. The operator dials the pendant
-        # to whatever speed they want; we latch that value on startup and
-        # then drive the slider between [latched] (safe) and
-        # [latched * SLOWDOWN_FACTOR] (hand detected) via the speed-slider
-        # service. Plan-time vel/acc scaling stays under code control via
-        # VEL_SCALING_NORMAL / ACC_SCALING_NORMAL — orthogonal knob.
-        self._pendant_scaling = None  # None = not yet received
-        self._last_slider_fraction = None
-        self._speed_scaling_sub = self.create_subscription(
-            Float64, '/speed_scaling_state_broadcaster/speed_scaling',
-            self._on_pendant_scaling, 10,
-        )
+        # UR speed-slider service: lets us slow the *currently executing*
+        # trajectory in real time when a hand enters the scene (the plan-time
+        # max_velocity_scaling_factor only affects the next plan).
         self.speed_slider_client = self.create_client(
             SetSpeedSliderFraction,
             '/io_and_status_controller/set_speed_slider',
         )
+        self._last_slider_fraction = None
         # RViz-only visualisation: publish the same open/close intent to the
         # mock-backed gripper position controller so the URDF fingers move.
         self.gripper_pub = self.create_publisher(
@@ -507,13 +500,21 @@ class PickPlaceManagerNode(Node):
         self.command_queue = []          # list[str] of remaining can classes to pick
         self.identified = []             # list[{'class': str, 'pos': (x,y,z)}]
 
+        # Classes ordered but not present in the current identification —
+        # held over until the next identify pass instead of being thrown out.
+        # When command_queue empties, deferred is swapped back in and the FSM
+        # re-enters the identify branch (provided we picked at least one can
+        # since the last identify, otherwise we'd loop forever).
+        self.deferred_queue = []
+        self.progress_this_pass = False
+
         # /order debounce: a single logical order can arrive as multiple
         # back-to-back messages, one per type, e.g.
         #   "type: coke, amount: 1"
         #   "type: beer, amount: 1"
         # Collect them all and only start the cycle after no new order has
         # arrived for ORDER_DEBOUNCE_S seconds.
-        self.ORDER_DEBOUNCE_S = 0.7
+        self.ORDER_DEBOUNCE_S = 2.0
         self._order_debounce_timer = None
 
         # Per-pick state
@@ -757,6 +758,8 @@ class PickPlaceManagerNode(Node):
         if not self.command_queue:
             return
         self.identified = []
+        self.deferred_queue = []
+        self.progress_this_pass = False
         self.get_logger().info(
             f'Order complete — starting cycle. Full queue: {self.command_queue}'
         )
@@ -771,59 +774,20 @@ class PickPlaceManagerNode(Node):
             self._human_proximity = float(msg.data)
         except (TypeError, ValueError):
             return
-        # Drive the pendant slider live so in-flight motions slow the moment
-        # a hand is detected. The "fast" target is the value we latched on
-        # startup (operator's chosen speed); "slow" is that × SLOWDOWN_FACTOR.
-        self.get_logger().debug(
-            f'Proximity update: {self._human_proximity:.3f}, '
-            f'pendant_scaling={self._pendant_scaling}, last_slider={self._last_slider_fraction}'
-        )
-        if self._pendant_scaling is None:
-            self.get_logger().info('Pendant scaling not latched yet; ignoring proximity.')
-            return  # haven't heard the pendant yet — wait for the latch
-        if self._human_proximity < HUMAN_PROXIMITY_THRESHOLD:
-            target = self._pendant_scaling * SLOWDOWN_FACTOR
-        else:
-            target = self._pendant_scaling
-        if target != self._last_slider_fraction:
-            self.get_logger().info(
-                f'Setting speed slider target {target:.3f} (proximity={self._human_proximity:.3f})'
-            )
-            self._set_speed_slider(target)
-
-    def _on_pendant_scaling(self, msg):
-        # Latch the pendant slider value the *first* time we hear it. This is
-        # the operator's chosen speed and becomes our "safe" slider target.
-        # Subsequent updates are ignored because they'll mostly be feedback
-        # from our own _set_speed_slider calls.
-        if self._pendant_scaling is not None:
-            return
-        try:
-            val = float(msg.data)
-        except (TypeError, ValueError):
-            return
-        val = max(0.01, min(1.0, val))
-        self._pendant_scaling = val
-        self._last_slider_fraction = val  # already there — no need to set it
-        self.get_logger().info(
-            f'Pendant speed slider latched at {val:.2f}. '
-            f'Slow mode will drive it to {val * SLOWDOWN_FACTOR:.3f}.'
-        )
+        # Drive the UR speed slider directly so an in-flight motion slows
+        # the moment a hand is detected, not just at the next plan boundary.
+        # Use 20% slider fraction normally, and 10% when a hand is close.
+        desired = (SLOWDOWN_FACTOR
+                   if self._human_proximity < HUMAN_PROXIMITY_THRESHOLD
+                   else FAST_FACTOR)
+        if desired != self._last_slider_fraction:
+            self._set_speed_slider(desired)
 
     def _set_speed_slider(self, fraction):
         fraction = max(0.01, min(1.0, float(fraction)))
-        # If the service isn't ready yet, give it a short wait so we can
-        # still drive the real robot's slider when it appears. If it remains
-        # unavailable, bail out (mock-hardware mode).
         if not self.speed_slider_client.service_is_ready():
-            self.get_logger().warn('Speed-slider service not ready; waiting up to 0.5s')
-            try:
-                ready = self.speed_slider_client.wait_for_service(timeout_sec=0.5)
-            except Exception:
-                ready = False
-            if not ready:
-                self.get_logger().warn('Speed-slider service unavailable; cannot set slider.')
-                return
+            # Fake-hardware mode does not expose this service; quietly skip.
+            return
         req = SetSpeedSliderFraction.Request()
         req.speed_slider_fraction = fraction
         self.speed_slider_client.call_async(req)
@@ -861,10 +825,9 @@ class PickPlaceManagerNode(Node):
     # ------------------------------------------------------------------
 
     def _scaling_pair(self):
-        # Plan-time scaling is user-controlled via VEL_SCALING_NORMAL /
-        # ACC_SCALING_NORMAL. The pendant slider (driven dynamically by
-        # _on_proximity) handles runtime slowdown for hand detection — keeping
-        # these two knobs orthogonal.
+        if self._human_proximity < HUMAN_PROXIMITY_THRESHOLD:
+            return (VEL_SCALING_NORMAL * SLOWDOWN_FACTOR,
+                    ACC_SCALING_NORMAL * SLOWDOWN_FACTOR)
         return (VEL_SCALING_NORMAL, ACC_SCALING_NORMAL)
 
     # ------------------------------------------------------------------
@@ -1249,6 +1212,8 @@ class PickPlaceManagerNode(Node):
 
     def _abort_cycle(self):
         self.command_queue = []
+        self.deferred_queue = []
+        self.progress_this_pass = False
         self.active_target_pos = None
         self.active_target_class = None
         if self.active_place_slot is not None:
@@ -1404,6 +1369,10 @@ class PickPlaceManagerNode(Node):
         if s == 'RELEASE':
             self._send_gripper(GRIPPER_OPEN)
             self._mark_active_slot_filled()
+            # Mark that we got at least one can on the table this pass — if
+            # the cycle ends with deferred classes still pending, this gates
+            # whether we re-identify or give up.
+            self.progress_this_pass = True
             self._sleep(1.0, 'CARTESIAN_RETREAT')
             return
 
@@ -1433,6 +1402,27 @@ class PickPlaceManagerNode(Node):
 
     def _select_next_target(self):
         if not self.command_queue:
+            # Queue empty. If anything was deferred (missing from the last
+            # identification) and we picked at least one can since then,
+            # re-identify and try again. Otherwise we're done — give up on
+            # whatever's still deferred so we don't loop forever.
+            if self.deferred_queue:
+                if self.progress_this_pass:
+                    self.get_logger().info(
+                        f'Cycle empty; re-identifying for deferred classes: '
+                        f'{self.deferred_queue}'
+                    )
+                    self.command_queue = self.deferred_queue
+                    self.deferred_queue = []
+                    self.progress_this_pass = False
+                    self.identified = []
+                    self._enter('ORIENT_FORWARD')
+                    return
+                self.get_logger().warn(
+                    f'No progress on the last identify pass; '
+                    f'giving up on missing classes: {self.deferred_queue}'
+                )
+                self.deferred_queue = []
             self.get_logger().info('Command queue empty — cycle complete.')
             self._enter('ALL_DONE')
             return
@@ -1440,10 +1430,12 @@ class PickPlaceManagerNode(Node):
         next_class = self.command_queue[0]
         match = next((m for m in self.identified if m['class'] == next_class), None)
         if match is None:
-            self.get_logger().error(
-                f'No identified can of class "{next_class}" — skipping.'
+            self.get_logger().info(
+                f'No identified can of class "{next_class}" — '
+                f'deferring to next identify pass.'
             )
             self.command_queue.pop(0)
+            self.deferred_queue.append(next_class)
             return  # stay in NEXT_TARGET; tick will re-enter
 
         slot = self._next_free_slot()

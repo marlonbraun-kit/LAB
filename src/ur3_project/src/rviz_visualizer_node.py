@@ -26,8 +26,8 @@ UR3_DH = [
     (0.0,       0.0921,  0.0),
 ]
 
-PICK_ZONE = ( 0.2, -0.3, 0.0)
-PLACE_ZONE = (0.2,  0.3, 0.0)
+PICK_ZONE = ( 0.2, -0.35, 0.0)
+PLACE_ZONE = (0.2,  0.35, 0.0)
 ZONE_SIZE = (0.3, 0.3, 0.001)
 
 # Match pick_place_manager_node's PLACE_SLOT_OFFSETS layout exactly so the
